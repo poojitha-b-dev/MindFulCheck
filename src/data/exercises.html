@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Exercise Gallery</title>
+    <link rel="stylesheet" href="https://unpkg.com/swiper/swiper-bundle.min.css">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            margin: 0;
+            padding: 0;
+        }
+        header {
+            background-color: #333;
+            color: #fff;
+            padding: 20px;
+            text-align: center;
+        }
+        .container {
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 20px;
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        #age-input {
+            padding: 10px;
+            width: 50px;
+        }
+        #submit-button {
+            padding: 10px 20px;
+            border: none;
+            background-color: #333;
+            color: #fff;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        #submit-button:hover {
+            background-color: #555;
+        }
+        .gallery {
+            margin-top: 20px;
+        }
+        .swiper-container {
+            width: 100%;
+            height: 300px;
+        }
+        .swiper-slide {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .swiper-slide img {
+            width: 200px;
+            height: 200px;
+            border-radius: 8px;
+            object-fit: cover;
+        }
+        .swiper-slide p {
+            margin-top: 10px;
+            color: #333;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Exercise</h1>
+        <p>Enter your age to see recommended exercises</p>
+    </header>
+    <div class="container">
+        <input type="number" id="age-input" placeholder="Age">
+        <button id="submit-button" onclick="showExercises()">Submit</button>
+        <div class="gallery">
+            <div class="swiper-container">
+                <div class="swiper-wrapper" id="gallery"></div>
+                <!-- Add Pagination -->
+                <div class="swiper-pagination"></div>
+                <!-- Add Navigation -->
+                <div class="swiper-button-next"></div>
+                <div class="swiper-button-prev"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/swiper/swiper-bundle.min.js"></script>
+    <script>
+        const exercises = {
+            child: [
+                { name: "Jumping Jacks", img: "jumping-jacks.jpg" },
+                { name: "Bear Crawls", img: "bear-crawls.jpg" },
+                { name: "Skipping", img: "skipping.jpg" }
+            ],
+            teen: [
+                { name: "Push-ups", img: "push-ups.jpg" },
+                { name: "Squats", img: "squats.jpg" },
+                { name: "Planks", img: "planks.jpg" }
+            ],
+            adult: [
+                { name: "Running", img: "running.gif" },
+                { name: "Cycling", img: "cycling.gif" },
+                { name: "Yoga", img: "yogas.gif" }
+            ],
+            senior: [
+                { name: "Walking", img: "walking.jpg" },
+                { name: "Water Aerobics", img: "water-aerobics.jpg" },
+                { name: "Tai Chi", img: "tai-chi.jpg" }
+            ]
+        };
+
+        function showExercises() {
+            const age = document.getElementById('age-input').value;
+            const gallery = document.getElementById('gallery');
+            gallery.innerHTML = '';
+
+            let ageGroup;
+            if (age < 13) {
+                ageGroup = 'child';
+            } else if (age >= 13 && age <= 19) {
+                ageGroup = 'teen';
+            } else if (age >= 20 && age <= 50) {
+                ageGroup = 'adult';
+            } else {
+                ageGroup = 'senior';
+            }
+
+            exercises[ageGroup].forEach(exercise => {
+                const div = document.createElement('div');
+                div.className = 'swiper-slide exercise';
+                const img = document.createElement('img');
+                img.src = exercise.img;
+                img.alt = exercise.name;
+                const p = document.createElement('p');
+                p.textContent = exercise.name;
+                div.appendChild(img);
+                div.appendChild(p);
+                gallery.appendChild(div);
+            });
+
+            new Swiper('.swiper-container', {
+                loop: true,
+                pagination: {
+                    el: '.swiper-pagination',
+                    clickable: true,
+                },
+                navigation: {
+                    nextEl: '.swiper-button-next',
+                    prevEl: '.swiper-button-prev',
+                },
+            });
+        }
+    </script>
+</body>
+</html>
