@@ -21,19 +21,11 @@ const PasswordStrengthMeter: React.FC<PasswordStrengthProps> = ({ password }) =>
       setFadeOut(false);
       return;
     }
-
-    // Show immediately
     setVisible(true);
     setFadeOut(false);
-
-    // Start fade-out after 1.4s, fully gone by 1.8s
     const fadeTimer = setTimeout(() => setFadeOut(true), 1400);
     const hideTimer = setTimeout(() => setVisible(false), 1800);
-
-    return () => {
-      clearTimeout(fadeTimer);
-      clearTimeout(hideTimer);
-    };
+    return () => { clearTimeout(fadeTimer); clearTimeout(hideTimer); };
   }, [password]);
 
   if (!password || !visible) return null;
@@ -42,22 +34,11 @@ const PasswordStrengthMeter: React.FC<PasswordStrengthProps> = ({ password }) =>
   const config = strengthConfig[strength];
 
   return (
-    <div
-      style={{
-        transition: 'opacity 0.4s ease',
-        opacity: fadeOut ? 0 : 1,
-      }}
-      className="mt-2 space-y-1"
-    >
+    <div style={{ transition: 'opacity 0.4s ease', opacity: fadeOut ? 0 : 1 }} className="mt-2 space-y-1">
       <div className="h-1 bg-gray-100 rounded-full overflow-hidden">
-        <div
-          className={`h-full rounded-full transition-all duration-500 ${config.bar}`}
-          style={{ backgroundColor: config.color }}
-        />
+        <div className={`h-full rounded-full transition-all duration-500 ${config.bar}`} style={{ backgroundColor: config.color }} />
       </div>
-      <p className="text-xs" style={{ color: config.color }}>
-        {config.label}
-      </p>
+      <p className="text-xs" style={{ color: config.color }}>{config.label}</p>
     </div>
   );
 };

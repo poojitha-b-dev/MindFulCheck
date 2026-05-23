@@ -1,17 +1,20 @@
 /**
  * AuthContext.tsx
  *
- * Key changes vs original:
- * - register() now generates a 6-digit OTP, stores it in Firestore,
- *   and sends it via a backend endpoint (or Firebase Extension).
- *   It throws if the send fails so the caller can surface the error
- *   and NOT redirect to /verify-email.
- * - verifyOtp()  validates the code from Firestore and marks the
- *   Firebase user as verified via a custom claim / admin SDK call.
- * - login() surfaces auth/wrong-password and auth/user-not-found
- *   as distinct errors instead of swallowing them.
- * - resendOtp() replaces resendVerificationEmail().
- * - forgotPassword() is unchanged but errors propagate correctly.
+ * Requires "Email Enumeration Protection" to be DISABLED in Firebase Console:
+ *   Authentication → Settings → User Actions → uncheck "Email enumeration protection"
+ *
+ * With that off, Firebase returns:
+ *   auth/user-not-found   → no account with that email
+ *   auth/wrong-password   → account exists but password is wrong
+ *   auth/email-already-in-use → tried to register with existing email
+ *
+ * Registration guard:
+ *   Before calling createUserWithEmailAndPassword we attempt a dummy sign-in
+ *   to probe whether the email exists. If Firebase returns auth/wrong-password
+ *   the account already exists → we throw auth/email-already-in-use immediately
+ *   without creating anything or sending a verification email.
+ *   If Firebase returns auth/user-not-found → safe to register normally.
  */
 
 import React, {
@@ -26,18 +29,17 @@ import {
   signInWithEmailAndPassword,
   signOut,
   sendPasswordResetEmail,
+  sendEmailVerification,
   updateProfile,
+  updatePassword,
+  reauthenticateWithCredential,
+  EmailAuthProvider,
   onAuthStateChanged,
+  ActionCodeSettings,
   User,
   reload,
 } from 'firebase/auth';
-import {
-  doc,
-  setDoc,
-  getDoc,
-  serverTimestamp,
-  Timestamp,
-} from 'firebase/firestore';
+import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { auth, db } from '../services/firebase';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -49,53 +51,35 @@ interface AuthContextType {
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   forgotPassword: (email: string) => Promise<void>;
-  verifyOtp: (code: string) => Promise<void>;
-  resendOtp: () => Promise<void>;
+  resendVerificationEmail: () => Promise<void>;
   refreshUser: () => Promise<void>;
+  updateUserProfile: (data: { displayName?: string }) => Promise<void>;
+  updateUserPassword: (currentPassword: string, newPassword: string) => Promise<void>;
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Verification email settings ──────────────────────────────────────────────
+// After clicking the link, Firebase redirects the user to this URL.
+// Customize the email subject/body in:
+//   Firebase Console → Authentication → Templates → Email address verification
+const verificationActionSettings: ActionCodeSettings = {
+  url: `${window.location.origin}/login?verified=true`,
+  handleCodeInApp: false,
+};
 
-/** Generate a cryptographically random 6-digit string */
-function generateOtp(): string {
-  const array = new Uint32Array(1);
-  crypto.getRandomValues(array);
-  return String(array[0] % 1_000_000).padStart(6, '0');
-}
-
-/** OTP is valid for 10 minutes */
-const OTP_TTL_MS = 10 * 60 * 1000;
-
-/**
- * Send the OTP via your backend.
- * Replace the URL with your actual endpoint or Firebase Extension trigger.
- * The endpoint should send an email with the code and return 2xx on success.
- */
-async function sendOtpEmail(email: string, code: string, name: string): Promise<void> {
-  // Option A – custom backend endpoint (adjust URL as needed)
-  const res = await fetch('/api/send-verification-otp', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, code, name }),
-  });
-  if (!res.ok) {
-    const err: any = new Error('Failed to send verification email.');
-    err.code = 'auth/send-otp-failed';
-    throw err;
-  }
-}
-
-// ─── Error messages ───────────────────────────────────────────────────────────
+// ─── Error message map ────────────────────────────────────────────────────────
 
 export function getFirebaseErrorMessage(code: string): string {
   switch (code) {
     case 'auth/user-not-found':
-    case 'auth/invalid-credential':
       return 'No account found with this email address.';
     case 'auth/wrong-password':
       return 'Incorrect password. Please try again.';
     case 'auth/email-already-in-use':
       return 'An account with this email already exists.';
+    case 'auth/invalid-credential':
+      // Fallback if enumeration protection is still on — shouldn't appear
+      // once the Firebase Console setting is disabled.
+      return 'Incorrect email or password. Please try again.';
     case 'auth/weak-password':
       return 'Password must be at least 6 characters.';
     case 'auth/invalid-email':
@@ -106,12 +90,6 @@ export function getFirebaseErrorMessage(code: string): string {
       return 'Network error. Please check your connection and try again.';
     case 'auth/user-disabled':
       return 'This account has been disabled. Contact support.';
-    case 'auth/send-otp-failed':
-      return 'Could not send verification code. Please check your email address and try again.';
-    case 'auth/otp-expired':
-      return 'This code has expired. Please request a new one.';
-    case 'auth/otp-invalid':
-      return 'Incorrect code. Please check and try again.';
     case 'auth/email-not-verified':
       return 'Please verify your email before signing in.';
     default:
@@ -119,15 +97,54 @@ export function getFirebaseErrorMessage(code: string): string {
   }
 }
 
+// ─── Validators ───────────────────────────────────────────────────────────────
+
 export function validateEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
 }
 
-export function validatePassword(password: string): { isValid: boolean; message: string } {
-  if (password.length < 6) {
-    return { isValid: false, message: 'Password must be at least 6 characters.' };
+/**
+ * Username validation — strict allowlist.
+ * Only permits: letters (A-Z, a-z), digits (0-9), underscore (_), dot (.)
+ * Everything else — spaces, @, #, $, !, etc. — is rejected.
+ */
+export function validateName(name: string): { isValid: boolean; message: string } {
+  if (!name.trim()) {
+    return { isValid: false, message: 'Please enter your username.' };
+  }
+  if (name.trim().length < 2) {
+    return { isValid: false, message: 'Username must be at least 2 characters.' };
+  }
+  if (name.length > 60) {
+    return { isValid: false, message: 'Username must be under 60 characters.' };
+  }
+  // Allowlist: letters, digits, underscore, dot only
+  const allowed = /^[A-Za-z0-9_.]+$/;
+  if (!allowed.test(name)) {
+    return {
+      isValid: false,
+      message: 'Username may only contain letters, numbers, underscores (_), and dots (.).',
+    };
   }
   return { isValid: true, message: '' };
+}
+
+export function validatePassword(password: string): {
+  isValid: boolean;
+  message: string;
+  strength: 'weak' | 'moderate' | 'strong';
+} {
+  if (password.length < 6) {
+    return { isValid: false, message: 'Password must be at least 6 characters.', strength: 'weak' };
+  }
+  const hasUpper   = /[A-Z]/.test(password);
+  const hasNumber  = /[0-9]/.test(password);
+  const hasSpecial = /[^A-Za-z0-9]/.test(password);
+  const score = [hasUpper, hasNumber, hasSpecial].filter(Boolean).length;
+
+  if (password.length >= 10 && score >= 2) return { isValid: true, message: '', strength: 'strong' };
+  if (password.length >= 8  || score >= 1) return { isValid: true, message: '', strength: 'moderate' };
+  return { isValid: true, message: '', strength: 'weak' };
 }
 
 // ─── Context ──────────────────────────────────────────────────────────────────
@@ -144,7 +161,7 @@ export function useAuth(): AuthContextType {
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading]         = useState(true);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
@@ -155,94 +172,82 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // ── register ──────────────────────────────────────────────────────────────
+  /**
+   * Step 1 — Probe whether the email is already registered.
+   *   We attempt a sign-in with a deliberately wrong password ('__probe__').
+   *   With Email Enumeration Protection OFF:
+   *     auth/wrong-password  → account exists  → throw email-already-in-use
+   *     auth/user-not-found  → no account      → safe to register
+   *   Any other error (network, invalid-email) bubbles up normally.
+   *
+   * Step 2 — Create account, send verification email, sign out.
+   */
   async function register(email: string, password: string, name: string): Promise<void> {
-    // 1. Create the Firebase auth user
+    // Probe for existing account
+    try {
+      await signInWithEmailAndPassword(auth, email, '__probe__');
+      // If sign-in somehow succeeds (astronomically unlikely), sign back out
+      await signOut(auth);
+    } catch (probeErr: any) {
+      if (probeErr.code === 'auth/wrong-password') {
+        // Account exists — do NOT create a new one or send any email
+        const err: any = new Error('Account already exists.');
+        err.code = 'auth/email-already-in-use';
+        throw err;
+      }
+      if (probeErr.code !== 'auth/user-not-found') {
+        // Unexpected error (network, invalid-email, etc.) — surface it
+        throw probeErr;
+      }
+      // auth/user-not-found → no account → proceed to registration below
+    }
+
+    // Create the account
     const credential = await createUserWithEmailAndPassword(auth, email, password);
     const user = credential.user;
 
-    // 2. Set display name
     await updateProfile(user, { displayName: name });
 
-    // 3. Generate OTP and persist it in Firestore BEFORE trying to email it
-    const code = generateOtp();
-    const expiresAt = new Date(Date.now() + OTP_TTL_MS);
+    // Send Firebase's native verification link
+    await sendEmailVerification(user, verificationActionSettings);
 
-    await setDoc(doc(db, 'emailVerificationOtps', user.uid), {
-      code,
-      expiresAt: Timestamp.fromDate(expiresAt),
-      createdAt: serverTimestamp(),
+    // Persist profile to Firestore
+    await setDoc(doc(db, 'users', user.uid), {
+      name,
       email: user.email,
+      createdAt: serverTimestamp(),
     });
 
-    // 4. Send the email — if this throws, the caller won't redirect
-    await sendOtpEmail(email, code, name);
+    // Sign out — app access is gated on emailVerified === true
+    await signOut(auth);
   }
 
   // ── login ─────────────────────────────────────────────────────────────────
+  /**
+   * With Email Enumeration Protection OFF, Firebase returns distinct codes:
+   *   auth/user-not-found  → email not registered
+   *   auth/wrong-password  → email registered, password wrong
+   * Both propagate to getFirebaseErrorMessage which maps them correctly.
+   */
   async function login(email: string, password: string): Promise<void> {
     const credential = await signInWithEmailAndPassword(auth, email, password);
 
-    // Block unverified users with a clear error
     if (!credential.user.emailVerified) {
-      // Check Firestore in case we verified via OTP but haven't set Firebase claim
-      const otpDoc = await getDoc(doc(db, 'emailVerificationOtps', credential.user.uid));
-      const verified = otpDoc.exists() && otpDoc.data()?.verified === true;
-      if (!verified) {
-        const err: any = new Error('Email not verified.');
-        err.code = 'auth/email-not-verified';
-        throw err;
-      }
+      await signOut(auth);
+      const err: any = new Error('Email not verified.');
+      err.code = 'auth/email-not-verified';
+      throw err;
     }
   }
 
-  // ── verifyOtp ─────────────────────────────────────────────────────────────
-  async function verifyOtp(inputCode: string): Promise<void> {
-    if (!currentUser) throw Object.assign(new Error('Not logged in'), { code: 'auth/user-not-found' });
-
-    const ref = doc(db, 'emailVerificationOtps', currentUser.uid);
-    const snap = await getDoc(ref);
-
-    if (!snap.exists()) {
-      throw Object.assign(new Error('No OTP found'), { code: 'auth/otp-invalid' });
+  // ── resendVerificationEmail ───────────────────────────────────────────────
+  async function resendVerificationEmail(): Promise<void> {
+    if (!currentUser) {
+      const err: any = new Error('Not signed in.');
+      err.code = 'auth/user-not-found';
+      throw err;
     }
-
-    const data = snap.data();
-    const expiresAt: Timestamp = data.expiresAt;
-
-    if (expiresAt.toDate() < new Date()) {
-      throw Object.assign(new Error('OTP expired'), { code: 'auth/otp-expired' });
-    }
-    if (data.code !== inputCode.trim()) {
-      throw Object.assign(new Error('Wrong OTP'), { code: 'auth/otp-invalid' });
-    }
-
-    // Mark as verified in Firestore
-    await setDoc(ref, { ...data, verified: true }, { merge: true });
-
-    // Optionally call your backend to set emailVerified on Firebase Auth user
-    // via Admin SDK: await fetch('/api/mark-email-verified', { method:'POST', ... })
-  }
-
-  // ── resendOtp ─────────────────────────────────────────────────────────────
-  async function resendOtp(): Promise<void> {
-    if (!currentUser) throw Object.assign(new Error('Not logged in'), { code: 'auth/user-not-found' });
-
-    const code = generateOtp();
-    const expiresAt = new Date(Date.now() + OTP_TTL_MS);
-
-    await setDoc(doc(db, 'emailVerificationOtps', currentUser.uid), {
-      code,
-      expiresAt: Timestamp.fromDate(expiresAt),
-      createdAt: serverTimestamp(),
-      email: currentUser.email,
-      verified: false,
-    });
-
-    await sendOtpEmail(
-      currentUser.email!,
-      code,
-      currentUser.displayName ?? 'there',
-    );
+    await sendEmailVerification(currentUser, verificationActionSettings);
   }
 
   // ── forgotPassword ────────────────────────────────────────────────────────
@@ -259,8 +264,44 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   async function refreshUser(): Promise<void> {
     if (currentUser) {
       await reload(currentUser);
-      setCurrentUser({ ...currentUser });
+      setCurrentUser(
+        Object.assign(Object.create(Object.getPrototypeOf(currentUser)), currentUser)
+      );
     }
+  }
+
+  // ── updateUserProfile ─────────────────────────────────────────────────────
+  async function updateUserProfile(data: { displayName?: string }): Promise<void> {
+    if (!currentUser) throw Object.assign(new Error('Not signed in.'), { code: 'auth/user-not-found' });
+    if (data.displayName !== undefined) {
+      await updateProfile(currentUser, { displayName: data.displayName });
+      // Mirror the change to Firestore so it stays in sync
+      await setDoc(
+        doc(db, 'users', currentUser.uid),
+        { name: data.displayName },
+        { merge: true }
+      );
+    }
+    // Refresh local user object so UI reflects the change immediately
+    await reload(currentUser);
+    setCurrentUser(
+      Object.assign(Object.create(Object.getPrototypeOf(currentUser)), currentUser)
+    );
+  }
+
+  // ── updateUserPassword ────────────────────────────────────────────────────
+  /**
+   * Re-authenticates with the supplied current password, then sets the new one.
+   * Firebase requires a recent sign-in for sensitive operations; this satisfies
+   * that requirement without forcing a full logout.
+   */
+  async function updateUserPassword(currentPasswordValue: string, newPasswordValue: string): Promise<void> {
+    if (!currentUser || !currentUser.email) {
+      throw Object.assign(new Error('Not signed in.'), { code: 'auth/user-not-found' });
+    }
+    const credential = EmailAuthProvider.credential(currentUser.email, currentPasswordValue);
+    await reauthenticateWithCredential(currentUser, credential);
+    await updatePassword(currentUser, newPasswordValue);
   }
 
   const value: AuthContextType = {
@@ -270,9 +311,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     login,
     logout,
     forgotPassword,
-    verifyOtp,
-    resendOtp,
+    resendVerificationEmail,
     refreshUser,
+    updateUserProfile,
+    updateUserPassword,
   };
 
   return (
