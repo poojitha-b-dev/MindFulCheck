@@ -53,7 +53,28 @@ class MLChatbotService {
     anxiety: ['anxious', 'worried', 'nervous', 'panic', 'fear', 'stress', 'overwhelmed', 'restless', 'tense', 'on edge'],
     depression: ['sad', 'depressed', 'hopeless', 'empty', 'worthless', 'tired', 'exhausted', 'numb', 'lonely', 'isolated'],
     help: ['help', 'support', 'advice', 'guidance', 'assistance', 'therapy', 'counseling', 'talk', 'listen'],
-    crisis: ['suicide', 'kill', 'die', 'end', 'hurt', 'harm', 'emergency', 'can\'t go on', 'give up', 'no point'],
+    // IMPORTANT: these are matched as WHOLE WORDS via regex in detectIntent.
+    // Do NOT use bare substrings like 'end' or 'die' — they match inside
+    // 'boyfriend' (boyfri-END) and 'diet' (d-IE-t).
+    crisis: [
+      'suicid',          // matches suicide, suicidal
+      'kill myself',
+      'kill himself',
+      'kill herself',
+      'want to die',
+      'wish i was dead',
+      'wish i were dead',
+      'end my life',
+      'end it all',
+      "can't go on",
+      'no reason to live',
+      'no point in living',
+      'hurt myself',
+      'self harm',
+      'self-harm',
+      'cutting myself',
+      'overdose',
+    ],
     sharing: ['share', 'tell', 'talk about', 'explain', 'describe', 'open up', 'confide', 'express']
   };
 
@@ -257,9 +278,21 @@ class MLChatbotService {
 
   private detectIntent(text: string): string {
     const lowerText = text.toLowerCase();
-    
-    // Crisis detection (highest priority)
-    if (this.mentalHealthKeywords.crisis.some(word => lowerText.includes(word))) {
+
+    // ── Crisis detection (highest priority) ──────────────────────────────────
+    // Each phrase is tested as a literal substring match (the list no longer
+    // contains short subwords that occur inside innocent words like 'boyfriend').
+    // Single-word entries like 'suicid' are wrapped in \b word boundaries so
+    // 'suicide', 'suicidal', etc. all match but random occurrences don't.
+    const crisisMatch = this.mentalHealthKeywords.crisis.some(phrase => {
+      // Multi-word phrases: plain substring match is safe (specific enough)
+      if (phrase.includes(' ') || phrase.includes('-')) {
+        return lowerText.includes(phrase);
+      }
+      // Single-word stems: require word boundary so 'suicid' doesn't match inside other words
+      return new RegExp('\\b' + phrase, 'i').test(lowerText);
+    });
+    if (crisisMatch) {
       return 'crisis';
     }
 

@@ -138,9 +138,13 @@ async function getSmartResponse(
   }
 
   // Patch: if ML says crisis but our real-crisis check disagrees → treat as distress/sharing
+  // We ALSO clear the crisis response text so the user never sees the crisis
+  // helpline message for things like "i broke up with my boyfriend".
   let intent = mlResult.intent;
+  let mlFalsePositiveCrisis = false;
   if (intent === "crisis" && !isCrisis) {
     intent = isDistressed ? "sharing" : "general";
+    mlFalsePositiveCrisis = true;   // flag so we replace the response text below
   }
 
   // Patch: use our manual sentiment for short inputs when ML got it wrong
@@ -148,7 +152,11 @@ async function getSmartResponse(
 
   // ── 5. Build the response ─────────────────────────────────────────────────
 
-  let response = mlResult.response;
+  // If the ML produced a crisis response for a false positive, wipe it immediately
+  // so we never show crisis hotlines to someone talking about a breakup.
+  let response = mlFalsePositiveCrisis
+    ? ""   // will be filled in by the distress/negative-sentiment block below
+    : mlResult.response;
 
   // Patch: if ML gave a "positive" response but sentiment is actually negative → override
   const mlSaysPositive =
@@ -220,6 +228,18 @@ async function getSmartResponse(
     quickReplies = filteredMlReplies.length >= 2
       ? filteredMlReplies
       : ["I want to share something", "I've been struggling lately", "I'm doing okay actually", "Tell me something calming"];
+  }
+
+  // Final safety net: if something left response empty, build a sensible fallback
+  if (!response || response.trim() === "") {
+    if (isDistressed) {
+      const breakupMatch = /broke\s+up|breaking\s+up|heartbroken|heartbreak/i.test(userText);
+      response = breakupMatch
+        ? "Oh, I'm really sorry to hear that. Breakups are so painful, and it's completely okay to feel hurt right now. Do you want to talk about what happened?"
+        : "I can hear that something's weighing on you. I'm here — would you like to share a bit more about what's going on?";
+    } else {
+      response = "I'm here with you. Would you like to share a bit more about how you're feeling?";
+    }
   }
 
   return {
