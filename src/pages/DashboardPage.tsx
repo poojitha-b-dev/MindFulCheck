@@ -74,11 +74,36 @@ let _dashGad7: AssessmentScore | null = null;
 let _dashAssessmentHistory: AssessmentHistoryPoint[] = [];
 let _dashCallbacks: Array<() => void> = [];
 
+// ── Midnight-reset helpers ────────────────────────────────────────────────────
+// Cache is keyed by calendar date (YYYY-MM-DD). If the stored date differs from
+// today we wipe all cached data and tear down listeners so the next mount starts
+// fresh — ensuring the "Record Today" state and dashboard stats always reflect
+// the correct calendar day.
+const _getTodayKey = () => format(new Date(), 'yyyy-MM-dd');
+let _dashCacheDate: string = _getTodayKey();
+
+function _invalidateCacheIfNewDay(): void {
+  const today = _getTodayKey();
+  if (_dashCacheDate !== today) {
+    _dashCacheDate = today;
+    _dashStats = null;
+    _dashPhq9 = null;
+    _dashGad7 = null;
+    _dashAssessmentHistory = [];
+    _dashUnsubs.forEach(u => u());
+    _dashUnsubs = [];
+    _dashUid = null;
+  }
+}
+
 function notify() {
   _dashCallbacks.forEach(cb => cb());
 }
 
 function subscribeDashCache(uid: string, onChange: () => void): () => void {
+  // Check if it's a new calendar day and wipe stale cache first
+  _invalidateCacheIfNewDay();
+
   // Same user already wired up — just register this component's update callback
   if (_dashUid === uid && _dashUnsubs.length > 0) {
     _dashCallbacks.push(onChange);
@@ -238,8 +263,50 @@ const DashboardPage: React.FC = () => {
     return unregister;
   }, [currentUser]);
 
+  // ── Midnight auto-reset ────────────────────────────────────────────────────
+  // Schedule a one-shot timer that fires exactly at the next midnight.
+  // When it fires we invalidate the cache and trigger a re-subscribe so
+  // the dashboard immediately shows a clean slate for the new day.
+  useEffect(() => {
+    const msUntilMidnight = () => {
+      const now = new Date();
+      const midnight = new Date(now);
+      midnight.setHours(24, 0, 0, 0); // next midnight
+      return midnight.getTime() - now.getTime();
+    };
+
+    let timerId: ReturnType<typeof setTimeout>;
+
+    const scheduleMidnightReset = () => {
+      timerId = setTimeout(() => {
+        _invalidateCacheIfNewDay();
+        // Force a re-subscribe by resetting component state
+        setStats(null);
+        setPhq9(null);
+        setGad7(null);
+        setAssessmentHistory([]);
+        setIsLoading(true);
+        // Re-wire the cache for the new day
+        if (currentUser) {
+          subscribeDashCache(currentUser.uid, () => {
+            setStats(_dashStats);
+            setPhq9(_dashPhq9);
+            setGad7(_dashGad7);
+            setAssessmentHistory(_dashAssessmentHistory);
+            setIsLoading(false);
+          });
+        }
+        // Schedule the NEXT midnight reset
+        scheduleMidnightReset();
+      }, msUntilMidnight());
+    };
+
+    scheduleMidnightReset();
+    return () => clearTimeout(timerId);
+  }, [currentUser]);
+
   const handleRecordToday = () => {
-    // do nothing for now
+    setOpenRecordModal(true);
   };
   const handleGoToTracker = () => {
     navigate('/mood-tracker');

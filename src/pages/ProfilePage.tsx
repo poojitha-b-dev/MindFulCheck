@@ -4,8 +4,6 @@ import {
   Mail,
   Lock,
   Save,
-  AlertCircle,
-  Check,
   Eye,
   EyeOff,
   Shield,
@@ -15,18 +13,19 @@ import {
   ChevronUp,
 } from 'lucide-react';
 import { useAuth, validateName, validatePassword, getFirebaseErrorMessage } from '../contexts/AuthContext';
-import { collection, query, where, orderBy, getDocs, doc, getDoc, setDoc } from 'firebase/firestore';
+import { collection, query, orderBy, getDocs, doc, getDoc, setDoc } from 'firebase/firestore';
 import { db } from '../services/firebase';
+import Toast, { ToastState, showToast } from '../components/Toast';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface AssessmentRecord {
   id: string;
-  date: string; // ISO string
-  type: string; // e.g. "Depression (PHQ-9)"
+  date: string;
+  type: string;
   score: number;
-  severity: string; // e.g. "Mild"
-  severityColor: string; // Tailwind badge classes
+  severity: string;
+  severityColor: string;
 }
 
 interface NotificationPrefs {
@@ -41,12 +40,12 @@ interface NotificationPrefs {
 function severityBadge(severity: string): string {
   switch (severity?.toLowerCase()) {
     case 'none':
-    case 'minimal': return 'bg-green-100 text-green-800';
-    case 'mild':    return 'bg-secondary-100 text-secondary-800';
-    case 'moderate':return 'bg-warning-100 text-warning-800';
+    case 'minimal':  return 'bg-green-100 text-green-800';
+    case 'mild':     return 'bg-secondary-100 text-secondary-800';
+    case 'moderate': return 'bg-warning-100 text-warning-800';
     case 'severe':
     case 'moderately severe': return 'bg-red-100 text-red-800';
-    default:        return 'bg-gray-100 text-gray-800';
+    default:         return 'bg-gray-100 text-gray-800';
   }
 }
 
@@ -72,19 +71,22 @@ const Spinner = () => (
 const ProfilePage: React.FC = () => {
   const { currentUser, updateUserProfile, updateUserPassword } = useAuth();
 
+  // ── Toast ──
+  const [toast, setToast] = useState<ToastState | null>(null);
+
   // ── Profile section ──
-  const [name, setName]           = useState(currentUser?.displayName || '');
-  const [email]                   = useState(currentUser?.email || '');
-  const [profileSaving, setProfileSaving]   = useState(false);
+  const [name, setName]                 = useState(currentUser?.displayName || '');
+  const [email]                         = useState(currentUser?.email || '');
+  const [profileSaving, setProfileSaving] = useState(false);
 
   // ── Security section ──
-  const [currentPassword, setCurrentPassword]   = useState('');
-  const [newPassword, setNewPassword]           = useState('');
-  const [confirmPassword, setConfirmPassword]   = useState('');
+  const [currentPassword, setCurrentPassword]     = useState('');
+  const [newPassword, setNewPassword]             = useState('');
+  const [confirmPassword, setConfirmPassword]     = useState('');
   const [showCurrentPassword, setShowCurrentPassword] = useState(false);
   const [showNewPassword, setShowNewPassword]         = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
-  const [passwordSaving, setPasswordSaving]     = useState(false);
+  const [passwordSaving, setPasswordSaving]       = useState(false);
 
   // ── Notification section ──
   const [notifPrefs, setNotifPrefs] = useState<NotificationPrefs>({
@@ -97,31 +99,15 @@ const ProfilePage: React.FC = () => {
   const [notifLoading, setNotifLoading] = useState(false);
 
   // ── Assessment history section ──
-  const [assessments, setAssessments]     = useState<AssessmentRecord[]>([]);
+  const [assessments, setAssessments]               = useState<AssessmentRecord[]>([]);
   const [assessmentsLoading, setAssessmentsLoading] = useState(false);
   const [selectedAssessment, setSelectedAssessment] = useState<AssessmentRecord | null>(null);
 
   // ── Shared UI ──
   const [expandedSection, setExpandedSection] = useState<string | null>('profile');
-  const [successMessage, setSuccessMessage]   = useState('');
-  const [errorMessage, setErrorMessage]       = useState('');
-
-  // ── Flash helpers ────────────────────────────────────────────────────────
-  const flashSuccess = (msg: string) => {
-    setErrorMessage('');
-    setSuccessMessage(msg);
-    setTimeout(() => setSuccessMessage(''), 4000);
-  };
-  const flashError = (msg: string) => {
-    setSuccessMessage('');
-    setErrorMessage(msg);
-    setTimeout(() => setErrorMessage(''), 6000);
-  };
 
   const toggleSection = (section: string) => {
     setExpandedSection(prev => prev === section ? null : section);
-    setSuccessMessage('');
-    setErrorMessage('');
   };
 
   // ── Load notification prefs from Firestore ────────────────────────────────
@@ -132,34 +118,35 @@ const ProfilePage: React.FC = () => {
       .then(snap => {
         if (snap.exists()) {
           const d = snap.data();
-          if (d.notificationPrefs) {
-            setNotifPrefs(prev => ({ ...prev, ...d.notificationPrefs }));
-          }
+          if (d.notificationPrefs) setNotifPrefs(prev => ({ ...prev, ...d.notificationPrefs }));
         }
       })
-      .catch(() => {/* silently ignore — UI stays at defaults */})
+      .catch(() => {})
       .finally(() => setNotifLoading(false));
   }, [currentUser]);
 
   // ── Load assessment history from Firestore ────────────────────────────────
+  // AssessmentPage saves to: users/{uid}/assessments (subcollection)
+  // Fields: type ("PHQ-9" | "GAD-7"), score, severity, timestamp (Firestore Timestamp)
   useEffect(() => {
     if (expandedSection !== 'data' || !currentUser) return;
     setAssessmentsLoading(true);
-    const q = query(
-      collection(db, 'assessments'),
-      where('userId', '==', currentUser.uid),
-      orderBy('createdAt', 'desc')
-    );
+
+    const assessmentsRef = collection(db, 'users', currentUser.uid, 'assessments');
+    const q = query(assessmentsRef, orderBy('timestamp', 'desc'));
+
     getDocs(q)
       .then(snap => {
         const rows: AssessmentRecord[] = snap.docs.map(d => {
           const data = d.data();
-          const severity: string = data.severity ?? data.level ?? '—';
+          // Firestore Timestamps have .toDate(); plain JS dates don't
+          const rawDate = data.timestamp?.toDate?.() ?? new Date(data.timestamp ?? 0);
+          const severity: string = data.severity ?? '—';
           return {
             id: d.id,
-            date: data.createdAt?.toDate?.()?.toISOString() ?? '',
-            type: data.type ?? data.assessmentType ?? 'Assessment',
-            score: data.score ?? data.totalScore ?? 0,
+            date: rawDate.toISOString(),
+            type: data.type ?? 'Assessment',
+            score: data.score ?? 0,
             severity,
             severityColor: severityBadge(severity),
           };
@@ -175,14 +162,14 @@ const ProfilePage: React.FC = () => {
   const handleUpdateProfile = async (e: React.FormEvent) => {
     e.preventDefault();
     const check = validateName(name);
-    if (!check.isValid) { flashError(check.message); return; }
+    if (!check.isValid) { showToast(setToast, 'error', check.message); return; }
 
     try {
       setProfileSaving(true);
       await updateUserProfile({ displayName: name.trim() });
-      flashSuccess('Profile updated successfully.');
+      showToast(setToast, 'success', 'Profile updated successfully.');
     } catch (err: any) {
-      flashError(getFirebaseErrorMessage(err.code));
+      showToast(setToast, 'error', getFirebaseErrorMessage(err.code));
     } finally {
       setProfileSaving(false);
     }
@@ -190,11 +177,11 @@ const ProfilePage: React.FC = () => {
 
   const handleUpdatePassword = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!currentPassword) { flashError('Please enter your current password.'); return; }
+    if (!currentPassword) { showToast(setToast, 'error', 'Please enter your current password.'); return; }
     const pwCheck = validatePassword(newPassword);
-    if (!pwCheck.isValid) { flashError(pwCheck.message); return; }
-    if (newPassword !== confirmPassword) { flashError('New passwords do not match.'); return; }
-    if (newPassword === currentPassword)  { flashError('New password must differ from current password.'); return; }
+    if (!pwCheck.isValid) { showToast(setToast, 'error', pwCheck.message); return; }
+    if (newPassword !== confirmPassword) { showToast(setToast, 'error', 'New passwords do not match.'); return; }
+    if (newPassword === currentPassword)  { showToast(setToast, 'error', 'New password must differ from current password.'); return; }
 
     try {
       setPasswordSaving(true);
@@ -202,9 +189,9 @@ const ProfilePage: React.FC = () => {
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
-      flashSuccess('Password updated successfully.');
+      showToast(setToast, 'success', 'Password updated successfully.');
     } catch (err: any) {
-      flashError(getFirebaseErrorMessage(err.code));
+      showToast(setToast, 'error', getFirebaseErrorMessage(err.code), 6000);
     } finally {
       setPasswordSaving(false);
     }
@@ -214,14 +201,10 @@ const ProfilePage: React.FC = () => {
     if (!currentUser) return;
     try {
       setNotifSaving(true);
-      await setDoc(
-        doc(db, 'users', currentUser.uid),
-        { notificationPrefs: notifPrefs },
-        { merge: true }
-      );
-      flashSuccess('Notification preferences saved.');
-    } catch (err: any) {
-      flashError('Failed to save preferences. Please try again.');
+      await setDoc(doc(db, 'users', currentUser.uid), { notificationPrefs: notifPrefs }, { merge: true });
+      showToast(setToast, 'success', 'Notification preferences saved.');
+    } catch {
+      showToast(setToast, 'error', 'Failed to save preferences. Please try again.');
     } finally {
       setNotifSaving(false);
     }
@@ -229,7 +212,7 @@ const ProfilePage: React.FC = () => {
 
   const handleExportData = () => {
     if (!assessments.length) {
-      flashError('No assessment data to export.');
+      showToast(setToast, 'error', 'No assessment data to export.');
       return;
     }
     const header = 'Date,Assessment,Score,Severity\n';
@@ -243,6 +226,7 @@ const ProfilePage: React.FC = () => {
     a.download = `mindfulcheck-assessments-${Date.now()}.csv`;
     a.click();
     URL.revokeObjectURL(url);
+    showToast(setToast, 'success', 'Assessment data exported.');
   };
 
   const toggleNotif = (key: keyof NotificationPrefs) => {
@@ -252,23 +236,13 @@ const ProfilePage: React.FC = () => {
   // ─── Render ──────────────────────────────────────────────────────────────
   return (
     <div className="container mx-auto px-4 py-8">
+      {/* Global toast — renders in a portal at bottom-right */}
+      <Toast toast={toast} onDismiss={() => setToast(null)} />
+
       <div className="mb-8">
         <h1 className="text-3xl font-bold">Your Profile</h1>
         <p className="text-gray-600">Manage your account settings and preferences</p>
       </div>
-
-      {successMessage && (
-        <div className="mb-6 bg-secondary-50 border border-secondary-200 text-secondary-700 px-4 py-3 rounded-lg flex items-center">
-          <Check size={20} className="mr-2 text-secondary-500 flex-shrink-0" />
-          <span>{successMessage}</span>
-        </div>
-      )}
-      {errorMessage && (
-        <div className="mb-6 bg-error-50 border border-error-200 text-error-700 px-4 py-3 rounded-lg flex items-center">
-          <AlertCircle size={20} className="mr-2 text-error-500 flex-shrink-0" />
-          <span>{errorMessage}</span>
-        </div>
-      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         {/* ── Sidebar ── */}
@@ -337,14 +311,11 @@ const ProfilePage: React.FC = () => {
                   <ChevronUp size={20} />
                 </button>
               </div>
-
               <div className="p-6">
                 <form onSubmit={handleUpdateProfile}>
                   <div className="space-y-6">
                     <div>
-                      <label htmlFor="name" className="block text-sm font-medium text-gray-700 mb-1">
-                        Username
-                      </label>
+                      <label htmlFor="name" className="block text-sm font-medium text-gray-700 mb-1">Username</label>
                       <div className="relative">
                         <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                           <User size={18} className="text-gray-400" />
@@ -359,33 +330,18 @@ const ProfilePage: React.FC = () => {
                           placeholder="john_doe"
                         />
                       </div>
-                      <p className="mt-1 text-xs text-gray-500">
-                        Letters, numbers, underscores (_), and dots (.) only.
-                      </p>
+                      <p className="mt-1 text-xs text-gray-500">Letters, numbers, underscores (_), and dots (.) only.</p>
                     </div>
-
                     <div>
-                      <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-1">
-                        Email Address
-                      </label>
+                      <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-1">Email Address</label>
                       <div className="relative">
                         <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                           <Mail size={18} className="text-gray-400" />
                         </div>
-                        <input
-                          type="email"
-                          id="email"
-                          className="input pl-10 bg-gray-50"
-                          value={email}
-                          readOnly
-                          disabled
-                        />
+                        <input type="email" id="email" className="input pl-10 bg-gray-50" value={email} readOnly disabled />
                       </div>
-                      <p className="mt-1 text-xs text-gray-500">
-                        Email address cannot be changed for security reasons.
-                      </p>
+                      <p className="mt-1 text-xs text-gray-500">Email address cannot be changed for security reasons.</p>
                     </div>
-
                     <div className="pt-4 flex justify-end">
                       <button type="submit" className="btn-primary flex items-center" disabled={profileSaving}>
                         {profileSaving ? <><Spinner />Saving...</> : <><Save size={18} className="mr-1" />Save Changes</>}
@@ -409,99 +365,40 @@ const ProfilePage: React.FC = () => {
                   <ChevronUp size={20} />
                 </button>
               </div>
-
               <div className="p-6">
                 <form onSubmit={handleUpdatePassword}>
                   <div className="space-y-6">
-                    {/* Current password */}
-                    <div>
-                      <label htmlFor="current-password" className="block text-sm font-medium text-gray-700 mb-1">
-                        Current Password
-                      </label>
-                      <div className="relative">
-                        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                          <Lock size={18} className="text-gray-400" />
+                    {[
+                      { id: 'current-password', label: 'Current Password', value: currentPassword, setter: setCurrentPassword, show: showCurrentPassword, toggler: setShowCurrentPassword, complete: 'current-password' },
+                      { id: 'new-password',      label: 'New Password',     value: newPassword,     setter: setNewPassword,     show: showNewPassword,     toggler: setShowNewPassword,     complete: 'new-password' },
+                      { id: 'confirm-password',  label: 'Confirm New Password', value: confirmPassword, setter: setConfirmPassword, show: showConfirmPassword, toggler: setShowConfirmPassword, complete: 'new-password' },
+                    ].map(({ id, label, value, setter, show, toggler, complete }) => (
+                      <div key={id}>
+                        <label htmlFor={id} className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
+                        <div className="relative">
+                          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                            <Lock size={18} className="text-gray-400" />
+                          </div>
+                          <input
+                            type={show ? 'text' : 'password'}
+                            id={id}
+                            autoComplete={complete}
+                            className={`input pl-10 pr-10 ${
+                              id === 'confirm-password' && confirmPassword && confirmPassword !== newPassword
+                                ? 'border-red-300' : ''
+                            }`}
+                            value={value}
+                            onChange={(e) => setter(e.target.value)}
+                          />
+                          <button type="button" className="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600" onClick={() => toggler(v => !v)}>
+                            {show ? <EyeOff size={18} /> : <Eye size={18} />}
+                          </button>
                         </div>
-                        <input
-                          type={showCurrentPassword ? 'text' : 'password'}
-                          id="current-password"
-                          className="input pl-10 pr-10"
-                          value={currentPassword}
-                          onChange={(e) => setCurrentPassword(e.target.value)}
-                          autoComplete="current-password"
-                        />
-                        <button
-                          type="button"
-                          className="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600"
-                          onClick={() => setShowCurrentPassword(v => !v)}
-                          aria-label={showCurrentPassword ? 'Hide password' : 'Show password'}
-                        >
-                          {showCurrentPassword ? <EyeOff size={18} /> : <Eye size={18} />}
-                        </button>
+                        {id === 'confirm-password' && confirmPassword && confirmPassword !== newPassword && (
+                          <p className="text-xs text-red-400 mt-1">Passwords do not match.</p>
+                        )}
                       </div>
-                    </div>
-
-                    {/* New password */}
-                    <div>
-                      <label htmlFor="new-password" className="block text-sm font-medium text-gray-700 mb-1">
-                        New Password
-                      </label>
-                      <div className="relative">
-                        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                          <Lock size={18} className="text-gray-400" />
-                        </div>
-                        <input
-                          type={showNewPassword ? 'text' : 'password'}
-                          id="new-password"
-                          className="input pl-10 pr-10"
-                          value={newPassword}
-                          onChange={(e) => setNewPassword(e.target.value)}
-                          autoComplete="new-password"
-                        />
-                        <button
-                          type="button"
-                          className="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600"
-                          onClick={() => setShowNewPassword(v => !v)}
-                          aria-label={showNewPassword ? 'Hide password' : 'Show password'}
-                        >
-                          {showNewPassword ? <EyeOff size={18} /> : <Eye size={18} />}
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Confirm new password */}
-                    <div>
-                      <label htmlFor="confirm-password" className="block text-sm font-medium text-gray-700 mb-1">
-                        Confirm New Password
-                      </label>
-                      <div className="relative">
-                        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                          <Lock size={18} className="text-gray-400" />
-                        </div>
-                        <input
-                          type={showConfirmPassword ? 'text' : 'password'}
-                          id="confirm-password"
-                          className={`input pl-10 pr-10 ${
-                            confirmPassword && confirmPassword !== newPassword ? 'border-red-300' : ''
-                          }`}
-                          value={confirmPassword}
-                          onChange={(e) => setConfirmPassword(e.target.value)}
-                          autoComplete="new-password"
-                        />
-                        <button
-                          type="button"
-                          className="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600"
-                          onClick={() => setShowConfirmPassword(v => !v)}
-                          aria-label={showConfirmPassword ? 'Hide password' : 'Show password'}
-                        >
-                          {showConfirmPassword ? <EyeOff size={18} /> : <Eye size={18} />}
-                        </button>
-                      </div>
-                      {confirmPassword && confirmPassword !== newPassword && (
-                        <p className="text-xs text-red-400 mt-1">Passwords do not match.</p>
-                      )}
-                    </div>
-
+                    ))}
                     <div className="pt-4 flex justify-end">
                       <button type="submit" className="btn-primary flex items-center" disabled={passwordSaving}>
                         {passwordSaving ? <><Spinner />Updating...</> : <><Save size={18} className="mr-1" />Update Password</>}
@@ -525,7 +422,6 @@ const ProfilePage: React.FC = () => {
                   <ChevronUp size={20} />
                 </button>
               </div>
-
               <div className="p-6">
                 {notifLoading ? (
                   <div className="flex justify-center py-8">
@@ -548,23 +444,13 @@ const ProfilePage: React.FC = () => {
                           <p className="text-sm text-gray-500">{desc}</p>
                         </div>
                         <label className="relative inline-flex items-center cursor-pointer">
-                          <input
-                            type="checkbox"
-                            className="sr-only peer"
-                            checked={notifPrefs[key]}
-                            onChange={() => toggleNotif(key)}
-                          />
+                          <input type="checkbox" className="sr-only peer" checked={notifPrefs[key]} onChange={() => toggleNotif(key)} />
                           <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-primary-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-500"></div>
                         </label>
                       </div>
                     ))}
-
                     <div className="pt-4 flex justify-end">
-                      <button
-                        className="btn-primary flex items-center"
-                        onClick={handleSaveNotifications}
-                        disabled={notifSaving}
-                      >
+                      <button className="btn-primary flex items-center" onClick={handleSaveNotifications} disabled={notifSaving}>
                         {notifSaving ? <><Spinner />Saving...</> : <><Save size={18} className="mr-1" />Save Preferences</>}
                       </button>
                     </div>
@@ -586,7 +472,6 @@ const ProfilePage: React.FC = () => {
                   <ChevronUp size={20} />
                 </button>
               </div>
-
               <div className="p-6">
                 {assessmentsLoading ? (
                   <div className="flex justify-center py-8">
@@ -607,11 +492,9 @@ const ProfilePage: React.FC = () => {
                       <table className="w-full text-left">
                         <thead>
                           <tr className="bg-gray-50">
-                            <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
-                            <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Assessment</th>
-                            <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Score</th>
-                            <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Severity</th>
-                            <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                            {['Date', 'Assessment', 'Score', 'Severity', 'Actions'].map(h => (
+                              <th key={h} className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">{h}</th>
+                            ))}
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-200">
@@ -621,17 +504,10 @@ const ProfilePage: React.FC = () => {
                               <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{a.type}</td>
                               <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{a.score}</td>
                               <td className="px-6 py-4 whitespace-nowrap">
-                                <span className={`px-2 py-1 text-xs rounded-full font-medium ${a.severityColor}`}>
-                                  {a.severity}
-                                </span>
+                                <span className={`px-2 py-1 text-xs rounded-full font-medium ${a.severityColor}`}>{a.severity}</span>
                               </td>
                               <td className="px-6 py-4 whitespace-nowrap">
-                                <button
-                                  className="text-primary-600 hover:text-primary-800 text-sm font-medium"
-                                  onClick={() => setSelectedAssessment(a)}
-                                >
-                                  View
-                                </button>
+                                <button className="text-primary-600 hover:text-primary-800 text-sm font-medium" onClick={() => setSelectedAssessment(a)}>View</button>
                               </td>
                             </tr>
                           ))}
@@ -639,41 +515,17 @@ const ProfilePage: React.FC = () => {
                       </table>
                     </div>
 
-                    {/* Assessment detail modal */}
+                    {/* Detail modal */}
                     {selectedAssessment && (
-                      <div
-                        className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50"
-                        onClick={() => setSelectedAssessment(null)}
-                      >
-                        <div
-                          className="bg-white rounded-xl shadow-lg p-8 max-w-sm w-full mx-4"
-                          onClick={e => e.stopPropagation()}
-                        >
+                      <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50" onClick={() => setSelectedAssessment(null)}>
+                        <div className="bg-white rounded-xl shadow-lg p-8 max-w-sm w-full mx-4" onClick={e => e.stopPropagation()}>
                           <h3 className="text-lg font-semibold mb-4">{selectedAssessment.type}</h3>
                           <dl className="space-y-3 text-sm">
-                            <div className="flex justify-between">
-                              <dt className="text-gray-500">Date</dt>
-                              <dd className="font-medium">{formatDate(selectedAssessment.date)}</dd>
-                            </div>
-                            <div className="flex justify-between">
-                              <dt className="text-gray-500">Score</dt>
-                              <dd className="font-medium">{selectedAssessment.score}</dd>
-                            </div>
-                            <div className="flex justify-between items-center">
-                              <dt className="text-gray-500">Severity</dt>
-                              <dd>
-                                <span className={`px-2 py-1 text-xs rounded-full font-medium ${selectedAssessment.severityColor}`}>
-                                  {selectedAssessment.severity}
-                                </span>
-                              </dd>
-                            </div>
+                            <div className="flex justify-between"><dt className="text-gray-500">Date</dt><dd className="font-medium">{formatDate(selectedAssessment.date)}</dd></div>
+                            <div className="flex justify-between"><dt className="text-gray-500">Score</dt><dd className="font-medium">{selectedAssessment.score}</dd></div>
+                            <div className="flex justify-between items-center"><dt className="text-gray-500">Severity</dt><dd><span className={`px-2 py-1 text-xs rounded-full font-medium ${selectedAssessment.severityColor}`}>{selectedAssessment.severity}</span></dd></div>
                           </dl>
-                          <button
-                            className="mt-6 btn-primary w-full"
-                            onClick={() => setSelectedAssessment(null)}
-                          >
-                            Close
-                          </button>
+                          <button className="mt-6 btn-primary w-full" onClick={() => setSelectedAssessment(null)}>Close</button>
                         </div>
                       </div>
                     )}
@@ -682,14 +534,8 @@ const ProfilePage: React.FC = () => {
 
                 <div className="mt-6 bg-gray-50 p-4 rounded-lg border border-gray-200">
                   <h3 className="font-medium mb-2">Data Export</h3>
-                  <p className="text-sm text-gray-600 mb-3">
-                    Export all your assessment data and history as a CSV file.
-                  </p>
-                  <button
-                    className="btn-outline text-sm flex items-center gap-2"
-                    onClick={handleExportData}
-                    disabled={assessmentsLoading}
-                  >
+                  <p className="text-sm text-gray-600 mb-3">Export all your assessment data and history as a CSV file.</p>
+                  <button className="btn-outline text-sm flex items-center gap-2" onClick={handleExportData} disabled={assessmentsLoading}>
                     <Download size={16} />
                     Export My Data
                   </button>

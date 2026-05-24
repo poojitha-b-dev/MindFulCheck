@@ -61,6 +61,20 @@ let _uid: string | null = null;
 let _firestoreUnsub: (() => void) | null = null;
 export let _cachedEntries: ChartDataPoint[] = [];
 export let _cachedTodayLogged = false;
+// Date the cache was last built — used to detect a new calendar day
+let _cachedDate: string = format(new Date(), 'yyyy-MM-dd');
+
+/** Call at the top of subscribeMoodCache to wipe stale cross-midnight data */
+function _invalidateMoodCacheIfNewDay(): void {
+  const today = format(new Date(), 'yyyy-MM-dd');
+  if (_cachedDate !== today) {
+    _cachedDate = today;
+    _cachedTodayLogged = false;
+    _cachedEntries = [];
+    if (_firestoreUnsub) { _firestoreUnsub(); _firestoreUnsub = null; }
+    _uid = null;
+  }
+}
 let _componentCallbacks: Array<(entries: ChartDataPoint[], todayLogged: boolean) => void> = [];
 
 /** Builds a 30-day skeleton (today going back 29 days) and merges Firebase docs into it.
@@ -119,6 +133,9 @@ function subscribeMoodCache(
   uid: string,
   onUpdate: (entries: ChartDataPoint[], todayLogged: boolean) => void
 ): () => void {
+  // Wipe stale data if it's a new calendar day
+  _invalidateMoodCacheIfNewDay();
+
   if (_uid === uid && _firestoreUnsub) {
     _componentCallbacks.push(onUpdate);
     onUpdate(_cachedEntries, _cachedTodayLogged);
@@ -204,6 +221,45 @@ const MoodTrackerPage: React.FC = () => {
     });
 
     return unregister;
+  }, [currentUser]);
+
+  // ── Midnight auto-reset ────────────────────────────────────────────────────
+  // When the clock crosses midnight the "Logged Today" state must reset so the
+  // user can record a new entry for the new day without refreshing the page.
+  useEffect(() => {
+    const msUntilMidnight = () => {
+      const now = new Date();
+      const midnight = new Date(now);
+      midnight.setHours(24, 0, 0, 0);
+      return midnight.getTime() - now.getTime();
+    };
+
+    let timerId: ReturnType<typeof setTimeout>;
+
+    const scheduleMidnightReset = () => {
+      timerId = setTimeout(() => {
+        // Invalidate the module-level cache
+        _invalidateMoodCacheIfNewDay();
+        // Reset component state for the new day
+        setTodayAlreadyLogged(false);
+        setMoodData([]);
+        setIsLoading(true);
+        // Re-subscribe to Firestore with a fresh cache
+        if (currentUser) {
+          subscribeMoodCache(currentUser.uid, (entries, todayLogged) => {
+            setMoodData(entries);
+            setTodayAlreadyLogged(todayLogged);
+            setIsLoading(false);
+            if (entries.length > 0) runMoodAnalysis(entries);
+          });
+        }
+        scheduleMidnightReset();
+      }, msUntilMidnight());
+    };
+
+    scheduleMidnightReset();
+    return () => clearTimeout(timerId);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser]);
 
   const runMoodAnalysis = async (entries: ChartDataPoint[]) => {
