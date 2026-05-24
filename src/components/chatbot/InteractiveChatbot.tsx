@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Send, RotateCcw, Heart, AlertTriangle, Minus, Sparkles } from "lucide-react";
-import { mlChatbotService, ChatMessage as MLChatMessage } from "../../services/mlChatbotService";
+// mlChatbotService removed — Gemini via Netlify function handles all responses
 import { useChatbot, Message } from "../../contexts/ChatbotContext";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -26,13 +26,12 @@ const TYPING_MAX = 1400;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  SMART RESPONSE LAYER
-//  The mlChatbotService has several bugs:
-//    1. Substring matching — 'end' inside 'boyfriend', 'die' inside 'diet', etc.
-//       → incorrectly fires crisis intent
-//    2. Sentiment inversion — "not great" scores as positive because it finds
-//       the word "great" but ignores "not"
-//    3. Generic quick replies that don't relate to what was said
-//  This layer sits in front of the ML service and corrects those issues.
+//  Handles:
+//    1. Real crisis detection via strict whole-word / phrase regex (no false positives)
+//    2. Negation-aware sentiment for short phrases ("not great", "not fine")
+//    3. Contextual quick-reply chips based on what the user actually said
+//    4. Gemini API call via /.netlify/functions/fetch-openai with full history
+//    5. Graceful fallback if Gemini is unavailable
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Words that must match as WHOLE WORDS only to count as crisis
@@ -85,9 +84,35 @@ interface SmartResult {
   isCrisis: boolean;
 }
 
+// ─── Gemini API call via Netlify function ────────────────────────────────────
+// Converts the in-memory message list to the format expected by fetch-openai.js
+// (which forwards to Gemini 1.5 Pro) and returns a parsed SmartResult.
+
+const NETLIFY_FN = "/.netlify/functions/fetch-openai";
+
+async function callGemini(
+  userText: string,
+  history: { role: "user" | "assistant"; content: string }[],
+  userName?: string
+): Promise<{ message: string; quickReplies: string[]; intent: string; sentiment: number }> {
+  const res = await fetch(NETLIFY_FN, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages: history, userName: userName ?? null }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Netlify function returned ${res.status}`);
+  }
+
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  return data;
+}
+
 async function getSmartResponse(
   userText: string,
-  mlHistory: MLChatMessage[],
+  history: { role: "user" | "assistant"; content: string }[],
   userName?: string
 ): Promise<SmartResult> {
   const lower = userText.toLowerCase().trim();
@@ -95,119 +120,78 @@ async function getSmartResponse(
   // ── 1. Real crisis detection (whole-word / phrase matching) ──────────────
   const isCrisis = REAL_CRISIS_PHRASES.some(rx => rx.test(userText));
 
-  // ── 2. Distress detection (things the ML misses) ─────────────────────────
+  // ── 2. Distress detection ─────────────────────────────────────────────────
   const isDistressed = DISTRESS_SIGNALS.some(rx => rx.test(userText));
 
-  // ── 3. Negation-aware short-phrase override ───────────────────────────────
-  // For very short inputs (≤5 words), the ML's keyword scan is unreliable.
-  // We score these manually.
+  // ── 3. Negation-aware sentiment for short phrases ─────────────────────────
   const wordCount = lower.split(/\s+/).length;
   let manualSentiment: number | null = null;
 
   if (wordCount <= 6) {
     const positiveWords = ["good", "great", "amazing", "fantastic", "wonderful", "excellent", "happy", "fine", "okay", "well"];
     const negativeWords = ["bad", "awful", "terrible", "horrible", "sad", "depressed", "anxious", "tired", "exhausted", "low", "down", "struggling", "rough", "hard"];
-
     let score = 0;
     for (const w of positiveWords) {
-      if (lower.includes(w)) {
-        score += hasNegation(lower, w) ? -0.6 : 0.6;
-      }
+      if (lower.includes(w)) score += hasNegation(lower, w) ? -0.6 : 0.6;
     }
     for (const w of negativeWords) {
-      if (lower.includes(w)) {
-        score += hasNegation(lower, w) ? 0.3 : -0.6;
-      }
+      if (lower.includes(w)) score += hasNegation(lower, w) ? 0.3 : -0.6;
     }
     if (score !== 0) manualSentiment = Math.max(-1, Math.min(1, score));
   }
 
-  // ── 4. Override crisis intent if it's a false positive ───────────────────
-  // Call ML service to get its response, then patch it.
-  let mlResult: Awaited<ReturnType<typeof mlChatbotService.processMessage>>;
-  try {
-    mlResult = await mlChatbotService.processMessage(userText, mlHistory);
-  } catch {
+  // ── 4. If this is a confirmed crisis → skip Gemini and return immediately ──
+  //  Gemini still handles the empathetic framing, but we ensure crisis resources
+  //  are always appended by the caller (handleSendMessage) regardless of what
+  //  Gemini says — so we CAN let Gemini respond to genuine crisis messages.
+  //  For real crisis we override quick replies to safety-focused ones.
+  if (isCrisis) {
+    // Still call Gemini so the response is warm and human, but wrap with resources
+    let geminiMsg = "I hear you, and I want you to know you matter deeply. Please reach out to a crisis line right now — you don't have to face this alone. 💙";
+    try {
+      const geminiResult = await callGemini(userText, history, userName);
+      if (geminiResult.message) geminiMsg = geminiResult.message;
+    } catch { /* use the safe fallback above */ }
+
     return {
-      response: "I'm having a little trouble right now — could you say that again? I really want to be here for you. 💙",
-      intent: "error",
-      sentiment: 0,
-      quickReplies: ["Sure", "I'm feeling…", "I need support"],
-      isCrisis: false,
+      response: geminiMsg,
+      intent: "crisis",
+      sentiment: -1,
+      quickReplies: ["I'm safe right now", "I need to talk to someone", "Tell me more about 988", "Thank you"],
+      isCrisis: true,
     };
   }
 
-  // Patch: if ML says crisis but our real-crisis check disagrees → treat as distress/sharing
-  // We ALSO clear the crisis response text so the user never sees the crisis
-  // helpline message for things like "i broke up with my boyfriend".
-  let intent = mlResult.intent;
-  let mlFalsePositiveCrisis = false;
-  if (intent === "crisis" && !isCrisis) {
-    intent = isDistressed ? "sharing" : "general";
-    mlFalsePositiveCrisis = true;   // flag so we replace the response text below
+  // ── 5. Call Gemini for all non-crisis messages ────────────────────────────
+  let geminiResponse = "";
+  let geminiIntent   = "general";
+  let geminiSentiment = 0;
+  let geminiQuickReplies: string[] = [];
+
+  try {
+    const result = await callGemini(userText, history, userName);
+    geminiResponse      = result.message      || "";
+    geminiIntent        = result.intent       || "general";
+    geminiSentiment     = typeof result.sentiment === "number" ? result.sentiment : 0;
+    geminiQuickReplies  = Array.isArray(result.quickReplies) ? result.quickReplies : [];
+  } catch (err) {
+    console.error("Gemini call failed:", err);
+    // Graceful fallback — local empathy response so chat never breaks
+    geminiResponse = isDistressed
+      ? "I'm having a little trouble connecting right now, but I'm still here for you. Can you tell me more about what you're going through? 💙"
+      : "I'm having a little trouble right now — could you say that again? I really want to be here for you. 💙";
+    geminiIntent   = isDistressed ? "sharing" : "error";
   }
 
-  // Patch: use our manual sentiment for short inputs when ML got it wrong
-  const finalSentiment = manualSentiment !== null ? manualSentiment : mlResult.sentiment;
+  // ── 6. Use manual sentiment override for short phrases when reliable ───────
+  const finalSentiment = manualSentiment !== null ? manualSentiment : geminiSentiment;
 
-  // ── 5. Build the response ─────────────────────────────────────────────────
-
-  // If the ML produced a crisis response for a false positive, wipe it immediately
-  // so we never show crisis hotlines to someone talking about a breakup.
-  let response = mlFalsePositiveCrisis
-    ? ""   // will be filled in by the distress/negative-sentiment block below
-    : mlResult.response;
-
-  // Patch: if ML gave a "positive" response but sentiment is actually negative → override
-  const mlSaysPositive =
-    response.toLowerCase().includes("so glad to hear") ||
-    response.toLowerCase().includes("wonderful") ||
-    response.toLowerCase().includes("fantastic that") ||
-    response.toLowerCase().includes("i'm happy to hear");
-
-  if (mlSaysPositive && (finalSentiment < -0.2 || isDistressed)) {
-    // Build a proper empathetic response
-    if (isDistressed) {
-      const breakupMatch = /broke\s+up|breaking\s+up|heartbroken|heartbreak/i.test(userText);
-      const ventingMatch = /\b(fuck|shit|damn|ugh)\b/i.test(userText);
-
-      if (breakupMatch) {
-        response = "Oh, I'm so sorry. Breakups are genuinely painful — it's completely okay to feel hurt and upset right now. There's no timeline on grief, and whatever you're feeling is valid. Do you want to talk about it?";
-      } else if (ventingMatch) {
-        response = "Hey, I hear you — it sounds like things feel really overwhelming right now. You don't have to hold it together here. What's going on?";
-      } else {
-        response = "I'm sorry you're going through something hard. I'm right here and I want to understand what's happening for you. Can you tell me more about what's on your mind?";
-      }
-    } else {
-      // Negation case like "not great", "not good"
-      const negPhrases: Record<string, string> = {
-        "not great": "I hear you — 'not great' can mean a lot of things. What's been making things feel that way?",
-        "not good": "I'm sorry to hear that. What's been going on that's making things feel not so good?",
-        "not okay": "Thank you for being honest with me. It's okay to not be okay — want to tell me what's happening?",
-        "not fine": "I hear that things aren't feeling fine right now. I'm here — would you like to share more?",
-        "feeling bad": "I'm sorry you're feeling bad. I want to understand — is it more of a physical thing, an emotional thing, or both?",
-        "pretty bad": "That sounds rough. I'm really glad you told me — can you share a bit more about what's making things feel that way?",
-      };
-      for (const [phrase, reply] of Object.entries(negPhrases)) {
-        if (lower.includes(phrase)) {
-          response = reply;
-          break;
-        }
-      }
-      if (mlSaysPositive && finalSentiment < -0.2) {
-        // Still wrong — generic negative override
-        response = "I hear that things aren't feeling great right now, and that's completely okay to say. I'm here to listen — would you like to share more about what's been going on?";
-      }
-    }
-  }
-
-  // ── 6. Build contextual quick replies ────────────────────────────────────
-  //  The ML returns generic ones. We replace them based on what was said.
+  // ── 7. Contextual quick replies ───────────────────────────────────────────
+  //  Gemini already returns good chips via the system prompt, but we override
+  //  for specific high-signal patterns where we know better.
   let quickReplies: string[];
 
-  if (isCrisis) {
-    quickReplies = ["I'm safe right now", "I need to talk to someone", "Tell me more about 988", "Thank you"];
-  } else if (/broke\s+up|breaking\s+up|heartbroken/i.test(userText)) {
+  if (/broke\s+up|breaking\s+up|heartbroken/i.test(userText)) {
     quickReplies = ["I'm really sad about it", "I'm angry", "I feel numb", "I don't know how to cope", "I need distraction"];
   } else if (/\b(fuck|shit|damn|ugh|overwhelmed|can't take)\b/i.test(userText)) {
     quickReplies = ["I just needed to vent", "Everything feels like too much", "I need some advice", "Talk me through this"];
@@ -217,39 +201,33 @@ async function getSmartResponse(
     quickReplies = ["I've felt this way for a while", "I don't know why I feel this way", "I want to feel better", "I just need someone to listen"];
   } else if (/\b(tired|exhausted|drained|no energy)\b/i.test(userText)) {
     quickReplies = ["I haven't been sleeping well", "Everything feels like an effort", "I feel burnt out", "I just need rest"];
+  } else if (geminiQuickReplies.length >= 2) {
+    // Trust Gemini's chips when they're present and we have no strong signal
+    quickReplies = geminiQuickReplies.slice(0, 5);
   } else if (finalSentiment > 0.3) {
     quickReplies = ["Things have been going well lately", "I want to maintain this feeling", "I've been working on myself", "Tell me more about wellness"];
   } else if (finalSentiment < -0.3 || isDistressed) {
     quickReplies = ["I want to talk more about it", "I'm not sure where to start", "I've been feeling this way for a while", "I need some support"];
   } else {
-    // Neutral — use the ML's own suggestions if they're decent, otherwise generic
-    const mlReplies = mlResult.followUpQuestions?.slice(0, 4) ?? [];
-    const filteredMlReplies = mlReplies.filter(r => r.length < 50 && !r.includes("assessment"));
-    quickReplies = filteredMlReplies.length >= 2
-      ? filteredMlReplies
-      : ["I want to share something", "I've been struggling lately", "I'm doing okay actually", "Tell me something calming"];
+    quickReplies = ["What's been on your mind?", "I've been struggling lately", "I'm doing okay actually", "Tell me something calming"];
   }
 
-  // Final safety net: if something left response empty, build a sensible fallback
-  if (!response || response.trim() === "") {
-    if (isDistressed) {
-      const breakupMatch = /broke\s+up|breaking\s+up|heartbroken|heartbreak/i.test(userText);
-      response = breakupMatch
-        ? "Oh, I'm really sorry to hear that. Breakups are so painful, and it's completely okay to feel hurt right now. Do you want to talk about what happened?"
-        : "I can hear that something's weighing on you. I'm here — would you like to share a bit more about what's going on?";
-    } else {
-      response = "I'm here with you. Would you like to share a bit more about how you're feeling?";
-    }
+  // ── 8. Safety net ─────────────────────────────────────────────────────────
+  if (!geminiResponse.trim()) {
+    geminiResponse = isDistressed
+      ? "I can hear that something's weighing on you. I'm here — would you like to share a bit more about what's going on?"
+      : "I'm here with you. Would you like to share a bit more about how you're feeling?";
   }
 
   return {
-    response,
-    intent,
+    response: geminiResponse,
+    intent:   geminiIntent,
     sentiment: finalSentiment,
     quickReplies,
-    isCrisis,
+    isCrisis: false,
   };
 }
+
 
 // ─── Avatars ──────────────────────────────────────────────────────────────────
 
@@ -404,10 +382,7 @@ const InteractiveChatbot: React.FC<InteractiveChatbotProps> = ({ userProfile }) 
     if (isOpen) { resetUnread(); setTimeout(() => inputRef.current?.focus(), 300); }
   }, [isOpen]);
 
-  useEffect(() => {
-    mlChatbotService.initialize().catch(console.error);
-    if (userProfile) mlChatbotService.updateUserProfile(userProfile);
-  }, []);
+  // Gemini is called on demand — no local ML initialization needed
 
   // ── Add bot message with natural typing delay ─────────────────────────────
 
@@ -454,11 +429,18 @@ const InteractiveChatbot: React.FC<InteractiveChatbotProps> = ({ userProfile }) 
     addMessage({ id: uid(), text, sender: "user", timestamp: new Date() });
     if (!sessionStarted) setSessionStarted(true);
 
-    const mlHistory: MLChatMessage[] = messages.map(m => ({
-      id: m.id, text: m.text, sender: m.sender as "user" | "bot", timestamp: m.timestamp,
-    }));
+    // Build conversation history in the format Gemini/fetch-openai.js expects:
+    // [{role: "user"|"assistant", content: string}]
+    // Include the message the user just sent as the last entry.
+    const geminiHistory: { role: "user" | "assistant"; content: string }[] = [
+      ...messages.map(m => ({
+        role: (m.sender === "user" ? "user" : "assistant") as "user" | "assistant",
+        content: m.text,
+      })),
+      { role: "user" as const, content: text },
+    ];
 
-    const result = await getSmartResponse(text, mlHistory, userProfile?.name);
+    const result = await getSmartResponse(text, geminiHistory, userProfile?.name);
 
     // Update phase
     if (result.isCrisis) {
@@ -493,7 +475,6 @@ const InteractiveChatbot: React.FC<InteractiveChatbotProps> = ({ userProfile }) 
 
   const handleReset = () => {
     clearMessages();
-    mlChatbotService.clearConversationContext();
     setShowCrisisBanner(false);
     setActiveQuickReplies([]);
     setInput("");
