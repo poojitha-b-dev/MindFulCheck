@@ -50,9 +50,6 @@ MindFulCheck-main
 │  └─ ml-backend-server.js
 ├─ eslint.config.js
 ├─ index.html
-├─ netlify
-│  └─ functions
-│     └─ fetch-openai.js
 ├─ package-lock.json
 ├─ package.json
 ├─ postcss.config.js
@@ -66,13 +63,13 @@ MindFulCheck-main
 │  │  │  ├─ PasswordStrengthMeter.tsx
 │  │  │  └─ ProtectedRoute.tsx
 │  │  ├─ chatbot
-│  │  │  ├─ Chatbot.tsx
 │  │  │  └─ InteractiveChatbot.tsx
 │  │  ├─ layout
 │  │  │  ├─ Footer.tsx
 │  │  │  ├─ Header.tsx
 │  │  │  ├─ Layout.tsx
 │  │  │  └─ Logo.tsx
+│  │  ├─ Toast.tsx
 │  │  └─ WellnessZone.tsx
 │  ├─ contexts
 │  │  ├─ AuthContext.tsx
@@ -101,7 +98,6 @@ MindFulCheck-main
 │  │  ├─ ResourcesPage.tsx
 │  │  └─ WellnessZonePage.tsx
 │  ├─ services
-│  │  ├─ chatbotService.ts
 │  │  ├─ firebase.ts
 │  │  ├─ locationService.ts
 │  │  ├─ mlChatbotService.ts
