@@ -2,32 +2,70 @@ export default async function handler(req, res) {
     if (req.method !== 'POST') {
         return res.status(405).json({ error: 'Method not allowed' });
     }
+
     const { messages, userName } = req.body;
-    const systemPrompt = `You are MindfulBot, a warm, empathetic mental wellness companion built into MindfulCheck, a mental health app. Your role is to provide emotional support, psychoeducation, and gentle guidance — never clinical diagnosis. Guidelines: Be warm, human, concise. For anxiety offer grounding techniques. For depression validate feelings. Never diagnose. If crisis detected mention 988. Always return JSON with: message, quickReplies (array of 3-5 short strings), intent (string), sentiment (number -1 to 1). ${userName ? `The user's name is ${userName}` : ''} Return ONLY valid JSON. Format: {"message": "...", "quickReplies": ["...", "..."], "intent": "...", "sentiment": 0.0}`;
+
+    const systemPrompt = `You are MindfulBot, a warm, empathetic mental wellness companion. Provide emotional support and gentle guidance.
+Guidelines:
+- Be warm, concise (2-4 sentences max)
+- For anxiety: offer grounding/breathing techniques
+- For depression/sadness: validate feelings, offer small steps
+- Never diagnose or prescribe
+- If crisis detected, mention 988 and crisis text line
+${userName ? `- The user's name is ${userName}` : ''}
+You MUST respond with ONLY a raw JSON object. No markdown, no backticks, no explanation before or after.
+Example: {"message": "I hear you.", "quickReplies": ["Tell me more", "I need help"], "intent": "support", "sentiment": -0.5}`;
+
     try {
-        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${process.env.GROQ_API_KEY}`
-            },
-            body: JSON.stringify({
-                model: 'llama3-70b-8192',
-                messages: [
-                    { role: 'system', content: systemPrompt },
-                    ...messages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }))
-                ],
-                temperature: 0.8,
-                max_tokens: 512,
-            })
-        });
+        const response = await fetch(
+            'https://api.groq.com/openai/v1/chat/completions',
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${process.env.GROQ_API_KEY}`
+                },
+                body: JSON.stringify({
+                    model: 'llama3-70b-8192',
+                    messages: [
+                        { role: 'system', content: systemPrompt },
+                        ...messages.map(m => ({
+                            role: m.role === 'assistant' ? 'assistant' : 'user',
+                            content: m.content
+                        }))
+                    ],
+                    temperature: 0.7,
+                    max_tokens: 300,
+                })
+            }
+        );
+
         const data = await response.json();
-        if (!response.ok) throw new Error(`Groq returned ${response.status}: ${data?.error?.message}`);
+
+        if (!response.ok) {
+            console.error('Groq HTTP error:', response.status, JSON.stringify(data));
+            throw new Error(`Groq returned ${response.status}: ${data?.error?.message}`);
+        }
+
         const text = data.choices?.[0]?.message?.content;
-        if (!text) throw new Error('No response from Groq');
-        const jsonMatch = text.match(/\{[\s\S]*\}/); if (!jsonMatch) throw new Error("No JSON in response"); const clean = jsonMatch[0].trim();
-        const parsed = JSON.parse(clean);
+
+        if (!text) {
+            console.error('No text in Groq response:', JSON.stringify(data));
+            throw new Error('No response from Groq');
+        }
+
+        console.log('Groq raw response:', text);
+
+        // Extract JSON from response - handles cases where model adds extra text
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) {
+            console.error('No JSON found in response:', text);
+            throw new Error('No JSON in Groq response');
+        }
+
+        const parsed = JSON.parse(jsonMatch[0]);
         return res.status(200).json(parsed);
+
     } catch (err) {
         console.error('Groq error:', err);
         return res.status(200).json({
@@ -38,4 +76,3 @@ export default async function handler(req, res) {
         });
     }
 }
-
