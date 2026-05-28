@@ -168,10 +168,7 @@ const ProfilePage: React.FC = () => {
       const currentHour   = now.getHours();
       const currentMinute = now.getMinutes();
 
-      // Send if we're within the same hour as the target (e.g. any time between 09:00–09:59)
-      if (currentHour !== targetHour) return;
-      // Optional tighter check: only within first 30 min of the hour
-      if (currentMinute > 30) return;
+
 
       // Build the messages to send
       const messages: { message: string }[] = [];
