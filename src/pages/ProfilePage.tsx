@@ -16,6 +16,12 @@ import { useAuth, validateName, validatePassword, getFirebaseErrorMessage } from
 import { collection, query, orderBy, getDocs, doc, getDoc, setDoc } from 'firebase/firestore';
 import { db } from '../services/firebase';
 import Toast, { ToastState, showToast } from '../components/Toast';
+import emailjs from '@emailjs/browser';
+
+// ─── EmailJS config — fill these in after setting up emailjs.com ──────────────
+const EMAILJS_SERVICE_ID  = 'YOUR_SERVICE_ID';   // e.g. 'service_abc123'
+const EMAILJS_TEMPLATE_ID = 'YOUR_TEMPLATE_ID';  // e.g. 'template_xyz789'
+const EMAILJS_PUBLIC_KEY  = 'YOUR_PUBLIC_KEY';   // e.g. 'abcDEFghiJKL'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -33,6 +39,7 @@ interface NotificationPrefs {
   assessmentReminders: boolean;
   moodCheckIns: boolean;
   newResources: boolean;
+  reminderTime: string; // "HH:MM" 24-hour format, e.g. "09:00"
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -57,6 +64,11 @@ function formatDate(iso: string): string {
   }
 }
 
+// Returns today's date as "YYYY-MM-DD"
+function todayStr(): string {
+  return new Date().toISOString().split('T')[0];
+}
+
 // ─── Spinner ──────────────────────────────────────────────────────────────────
 
 const Spinner = () => (
@@ -75,25 +87,26 @@ const ProfilePage: React.FC = () => {
   const [toast, setToast] = useState<ToastState | null>(null);
 
   // ── Profile section ──
-  const [name, setName]                 = useState(currentUser?.displayName || '');
-  const [email]                         = useState(currentUser?.email || '');
+  const [name, setName]                   = useState(currentUser?.displayName || '');
+  const [email]                           = useState(currentUser?.email || '');
   const [profileSaving, setProfileSaving] = useState(false);
 
   // ── Security section ──
-  const [currentPassword, setCurrentPassword]     = useState('');
-  const [newPassword, setNewPassword]             = useState('');
-  const [confirmPassword, setConfirmPassword]     = useState('');
+  const [currentPassword, setCurrentPassword]         = useState('');
+  const [newPassword, setNewPassword]                 = useState('');
+  const [confirmPassword, setConfirmPassword]         = useState('');
   const [showCurrentPassword, setShowCurrentPassword] = useState(false);
   const [showNewPassword, setShowNewPassword]         = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
-  const [passwordSaving, setPasswordSaving]       = useState(false);
+  const [passwordSaving, setPasswordSaving]           = useState(false);
 
   // ── Notification section ──
   const [notifPrefs, setNotifPrefs] = useState<NotificationPrefs>({
-    emailNotifications: true,
+    emailNotifications:  true,
     assessmentReminders: true,
-    moodCheckIns: true,
-    newResources: false,
+    moodCheckIns:        true,
+    newResources:        false,
+    reminderTime:        '09:00',
   });
   const [notifSaving, setNotifSaving]   = useState(false);
   const [notifLoading, setNotifLoading] = useState(false);
@@ -118,16 +131,97 @@ const ProfilePage: React.FC = () => {
       .then(snap => {
         if (snap.exists()) {
           const d = snap.data();
-          if (d.notificationPrefs) setNotifPrefs(prev => ({ ...prev, ...d.notificationPrefs }));
+          if (d.notificationPrefs) {
+            setNotifPrefs(prev => ({
+              ...prev,
+              ...d.notificationPrefs,
+              reminderTime: d.notificationPrefs.reminderTime ?? '09:00',
+            }));
+          }
         }
       })
       .catch(() => {})
       .finally(() => setNotifLoading(false));
   }, [currentUser]);
 
+  // ── Check & send reminders when the app is opened ─────────────────────────
+  // Logic: if emailNotifications is on, a specific sub-toggle is on,
+  // the current hour matches reminderTime, and we haven't sent today → send.
+  useEffect(() => {
+    if (!currentUser || !notifPrefs.emailNotifications) return;
+    if (EMAILJS_SERVICE_ID === 'YOUR_SERVICE_ID') return; // not configured yet
+
+    const checkAndSendReminders = async () => {
+      const userRef = doc(db, 'users', currentUser.uid);
+      const snap = await getDoc(userRef);
+      if (!snap.exists()) return;
+
+      const data = snap.data();
+      const lastSent: string = data.lastReminderSent ?? '';
+      const today = todayStr();
+
+      // Already sent today — skip
+      if (lastSent === today) return;
+
+      // Check if current hour matches the chosen reminder time
+      const [targetHour, targetMinute] = (notifPrefs.reminderTime ?? '09:00').split(':').map(Number);
+      const now = new Date();
+      const currentHour   = now.getHours();
+      const currentMinute = now.getMinutes();
+
+      // Send if we're within the same hour as the target (e.g. any time between 09:00–09:59)
+      if (currentHour !== targetHour) return;
+      // Optional tighter check: only within first 30 min of the hour
+      if (currentMinute > 30) return;
+
+      // Build the messages to send
+      const messages: { message: string }[] = [];
+
+      if (notifPrefs.assessmentReminders) {
+        messages.push({
+          message: "It's time for your periodic mental wellness assessment! Regular check-ins help track your progress. Visit MindfulCheck to take your PHQ-9 or GAD-7 assessment today.",
+        });
+      }
+      if (notifPrefs.moodCheckIns) {
+        messages.push({
+          message: "Don't forget to log your mood today! Tracking your daily mood, sleep, and energy helps you understand your mental wellness trends over time.",
+        });
+      }
+      if (notifPrefs.newResources) {
+        messages.push({
+          message: "New mental health resources are available on MindfulCheck! Check out the latest articles, videos, and podcasts to support your wellness journey.",
+        });
+      }
+
+      if (messages.length === 0) return;
+
+      // Send one combined email
+      const combinedMessage = messages.map((m, i) => `${i + 1}. ${m.message}`).join('\n\n');
+
+      try {
+        await emailjs.send(
+          EMAILJS_SERVICE_ID,
+          EMAILJS_TEMPLATE_ID,
+          {
+            to_email: currentUser.email,
+            to_name:  currentUser.displayName || 'there',
+            message:  combinedMessage,
+          },
+          EMAILJS_PUBLIC_KEY
+        );
+
+        // Mark today as sent so it doesn't fire again
+        await setDoc(userRef, { lastReminderSent: today }, { merge: true });
+      } catch (err) {
+        console.error('EmailJS send failed:', err);
+      }
+    };
+
+    checkAndSendReminders();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser, notifPrefs.emailNotifications, notifPrefs.reminderTime]);
+
   // ── Load assessment history from Firestore ────────────────────────────────
-  // AssessmentPage saves to: users/{uid}/assessments (subcollection)
-  // Fields: type ("PHQ-9" | "GAD-7"), score, severity, timestamp (Firestore Timestamp)
   useEffect(() => {
     if (expandedSection !== 'data' || !currentUser) return;
     setAssessmentsLoading(true);
@@ -139,7 +233,6 @@ const ProfilePage: React.FC = () => {
       .then(snap => {
         const rows: AssessmentRecord[] = snap.docs.map(d => {
           const data = d.data();
-          // Firestore Timestamps have .toDate(); plain JS dates don't
           const rawDate = data.timestamp?.toDate?.() ?? new Date(data.timestamp ?? 0);
           const severity: string = data.severity ?? '—';
           return {
@@ -230,13 +323,13 @@ const ProfilePage: React.FC = () => {
   };
 
   const toggleNotif = (key: keyof NotificationPrefs) => {
+    if (key === 'reminderTime') return; // handled separately
     setNotifPrefs(prev => ({ ...prev, [key]: !prev[key] }));
   };
 
   // ─── Render ──────────────────────────────────────────────────────────────
   return (
     <div className="container mx-auto px-4 py-8">
-      {/* Global toast — renders in a portal at bottom-right */}
       <Toast toast={toast} onDismiss={() => setToast(null)} />
 
       <div className="mb-8">
@@ -369,8 +462,8 @@ const ProfilePage: React.FC = () => {
                 <form onSubmit={handleUpdatePassword}>
                   <div className="space-y-6">
                     {[
-                      { id: 'current-password', label: 'Current Password', value: currentPassword, setter: setCurrentPassword, show: showCurrentPassword, toggler: setShowCurrentPassword, complete: 'current-password' },
-                      { id: 'new-password',      label: 'New Password',     value: newPassword,     setter: setNewPassword,     show: showNewPassword,     toggler: setShowNewPassword,     complete: 'new-password' },
+                      { id: 'current-password', label: 'Current Password',     value: currentPassword, setter: setCurrentPassword, show: showCurrentPassword, toggler: setShowCurrentPassword, complete: 'current-password' },
+                      { id: 'new-password',      label: 'New Password',         value: newPassword,     setter: setNewPassword,     show: showNewPassword,     toggler: setShowNewPassword,     complete: 'new-password' },
                       { id: 'confirm-password',  label: 'Confirm New Password', value: confirmPassword, setter: setConfirmPassword, show: showConfirmPassword, toggler: setShowConfirmPassword, complete: 'new-password' },
                     ].map(({ id, label, value, setter, show, toggler, complete }) => (
                       <div key={id}>
@@ -432,11 +525,13 @@ const ProfilePage: React.FC = () => {
                   </div>
                 ) : (
                   <div className="space-y-6">
+
+                    {/* Toggles */}
                     {([
-                      { key: 'emailNotifications',  label: 'Email Notifications',   desc: 'Receive email updates about your account and assessments' },
-                      { key: 'assessmentReminders', label: 'Assessment Reminders',  desc: 'Receive reminders to take periodic assessments' },
-                      { key: 'moodCheckIns',        label: 'Mood Check-ins',        desc: 'Receive reminders to log your daily mood' },
-                      { key: 'newResources',        label: 'New Resources',         desc: 'Receive notifications about new mental health resources' },
+                      { key: 'emailNotifications',  label: 'Email Notifications',  desc: 'Master switch — enables all email reminders below' },
+                      { key: 'assessmentReminders', label: 'Assessment Reminders', desc: 'Daily reminder to take your periodic PHQ-9 / GAD-7 assessment' },
+                      { key: 'moodCheckIns',        label: 'Mood Check-ins',       desc: 'Daily reminder to log your mood, sleep, and energy' },
+                      { key: 'newResources',        label: 'New Resources',        desc: 'Notifications about new mental health articles and videos' },
                     ] as { key: keyof NotificationPrefs; label: string; desc: string }[]).map(({ key, label, desc }) => (
                       <div key={key} className="flex items-center justify-between">
                         <div>
@@ -444,12 +539,49 @@ const ProfilePage: React.FC = () => {
                           <p className="text-sm text-gray-500">{desc}</p>
                         </div>
                         <label className="relative inline-flex items-center cursor-pointer">
-                          <input type="checkbox" className="sr-only peer" checked={notifPrefs[key]} onChange={() => toggleNotif(key)} />
+                          <input
+                            type="checkbox"
+                            className="sr-only peer"
+                            checked={notifPrefs[key] as boolean}
+                            onChange={() => toggleNotif(key)}
+                          />
                           <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-primary-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-500"></div>
                         </label>
                       </div>
                     ))}
-                    <div className="pt-4 flex justify-end">
+
+                    {/* Reminder time picker — only shown when email notifications are on */}
+                    {notifPrefs.emailNotifications && (
+                      <div className="pt-2 border-t border-gray-100">
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          Daily Reminder Time
+                        </label>
+                        <p className="text-sm text-gray-500 mb-3">
+                          You'll receive enabled reminders by email at this time each day (when you open the app).
+                        </p>
+                        <div className="flex items-center gap-3">
+                          <Clock size={18} className="text-primary-500 flex-shrink-0" />
+                          <input
+                            type="time"
+                            value={notifPrefs.reminderTime}
+                            onChange={(e) =>
+                              setNotifPrefs(prev => ({ ...prev, reminderTime: e.target.value }))
+                            }
+                            className="input w-36"
+                          />
+                          <span className="text-sm text-gray-500">
+                            (your local time)
+                          </span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Info note */}
+                    <div className="bg-blue-50 border border-blue-100 rounded-lg p-3 text-sm text-blue-700">
+                      💡 Reminders are sent when you open MindfulCheck at or after your chosen time. Make sure to open the app daily to receive them.
+                    </div>
+
+                    <div className="pt-2 flex justify-end">
                       <button className="btn-primary flex items-center" onClick={handleSaveNotifications} disabled={notifSaving}>
                         {notifSaving ? <><Spinner />Saving...</> : <><Save size={18} className="mr-1" />Save Preferences</>}
                       </button>
