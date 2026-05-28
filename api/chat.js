@@ -22,26 +22,24 @@ export default async function handler(req, res) {
 
     try {
         const response = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${process.env.GEMINI_API_KEY}`,
+            'https://api.openai.com/v1/chat/completions',
             {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+                },
                 body: JSON.stringify({
-                    system_instruction: { parts: [{ text: systemPrompt }] },
-                    contents: messages.map(m => ({
-                        role: m.role === 'assistant' ? 'model' : 'user',
-                        parts: [{ text: m.content }]
-                    })),
-                    generationConfig: {
-                        temperature: 0.8,
-                        maxOutputTokens: 512,
-                    },
-                    safetySettings: [
-                        { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
-                        { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
-                        { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
-                        { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
-                    ]
+                    model: 'gpt-3.5-turbo',
+                    messages: [
+                        { role: 'system', content: systemPrompt },
+                        ...messages.map(m => ({
+                            role: m.role === 'assistant' ? 'assistant' : 'user',
+                            content: m.content
+                        }))
+                    ],
+                    temperature: 0.8,
+                    max_tokens: 512,
                 })
             }
         );
@@ -49,20 +47,15 @@ export default async function handler(req, res) {
         const data = await response.json();
 
         if (!response.ok) {
-            console.error('Gemini HTTP error:', response.status, JSON.stringify(data));
-            throw new Error(`Gemini returned ${response.status}: ${data?.error?.message}`);
+            console.error('OpenAI HTTP error:', response.status, JSON.stringify(data));
+            throw new Error(`OpenAI returned ${response.status}: ${data?.error?.message}`);
         }
 
-        if (data.promptFeedback?.blockReason) {
-            console.error('Gemini blocked prompt:', data.promptFeedback.blockReason);
-            throw new Error(`Blocked: ${data.promptFeedback.blockReason}`);
-        }
-
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        const text = data.choices?.[0]?.message?.content;
 
         if (!text) {
-            console.error('No text in Gemini response:', JSON.stringify(data));
-            throw new Error('No response from Gemini');
+            console.error('No text in OpenAI response:', JSON.stringify(data));
+            throw new Error('No response from OpenAI');
         }
 
         const clean = text.replace(/```json|```/g, '').trim();
@@ -70,7 +63,7 @@ export default async function handler(req, res) {
 
         return res.status(200).json(parsed);
     } catch (err) {
-        console.error('Gemini error:', err);
+        console.error('OpenAI error:', err);
         return res.status(200).json({
             message: "I'm here for you. Could you tell me a bit more about how you're feeling? 💙",
             quickReplies: ["I'm struggling", "I'm okay", "I need support"],
