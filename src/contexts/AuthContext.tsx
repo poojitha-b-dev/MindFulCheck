@@ -137,13 +137,13 @@ export function validatePassword(password: string): {
   if (password.length < 6) {
     return { isValid: false, message: 'Password must be at least 6 characters.', strength: 'weak' };
   }
-  const hasUpper   = /[A-Z]/.test(password);
-  const hasNumber  = /[0-9]/.test(password);
+  const hasUpper = /[A-Z]/.test(password);
+  const hasNumber = /[0-9]/.test(password);
   const hasSpecial = /[^A-Za-z0-9]/.test(password);
   const score = [hasUpper, hasNumber, hasSpecial].filter(Boolean).length;
 
   if (password.length >= 10 && score >= 2) return { isValid: true, message: '', strength: 'strong' };
-  if (password.length >= 8  || score >= 1) return { isValid: true, message: '', strength: 'moderate' };
+  if (password.length >= 8 || score >= 1) return { isValid: true, message: '', strength: 'moderate' };
   return { isValid: true, message: '', strength: 'weak' };
 }
 
@@ -161,7 +161,7 @@ export function useAuth(): AuthContextType {
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [loading, setLoading]         = useState(true);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
@@ -252,7 +252,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // ── forgotPassword ────────────────────────────────────────────────────────
   async function forgotPassword(email: string): Promise<void> {
-    await sendPasswordResetEmail(auth, email);
+    const actionSettings: ActionCodeSettings = {
+      url: `${window.location.origin}/login`,
+      handleCodeInApp: false,
+    };
+    await sendPasswordResetEmail(auth, email, actionSettings);
   }
 
   // ── logout ────────────────────────────────────────────────────────────────
