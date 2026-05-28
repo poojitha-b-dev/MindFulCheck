@@ -25,7 +25,7 @@ export default async function handler(req, res) {
         if (!response.ok) throw new Error(`Groq returned ${response.status}: ${data?.error?.message}`);
         const text = data.choices?.[0]?.message?.content;
         if (!text) throw new Error('No response from Groq');
-        const clean = text.replace(/```json|```/g, '').trim();
+        const jsonMatch = text.match(/\{[\s\S]*\}/); if (!jsonMatch) throw new Error("No JSON in response"); const clean = jsonMatch[0].trim();
         const parsed = JSON.parse(clean);
         return res.status(200).json(parsed);
     } catch (err) {
@@ -38,3 +38,4 @@ export default async function handler(req, res) {
         });
     }
 }
+
