@@ -22,7 +22,7 @@ export default async function handler(req, res) {
 
     try {
         const response = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
             {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -35,7 +35,13 @@ export default async function handler(req, res) {
                     generationConfig: {
                         temperature: 0.8,
                         maxOutputTokens: 512,
-                    }
+                    },
+                    safetySettings: [
+                        { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+                        { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+                        { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+                        { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
+                    ]
                 })
             }
         );
@@ -47,9 +53,17 @@ export default async function handler(req, res) {
             throw new Error(`Gemini returned ${response.status}: ${data?.error?.message}`);
         }
 
+        if (data.promptFeedback?.blockReason) {
+            console.error('Gemini blocked prompt:', data.promptFeedback.blockReason);
+            throw new Error(`Blocked: ${data.promptFeedback.blockReason}`);
+        }
+
         const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
 
-        if (!text) throw new Error('No response from Gemini');
+        if (!text) {
+            console.error('No text in Gemini response:', JSON.stringify(data));
+            throw new Error('No response from Gemini');
+        }
 
         const clean = text.replace(/```json|```/g, '').trim();
         const parsed = JSON.parse(clean);
