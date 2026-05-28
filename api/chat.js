@@ -22,15 +22,15 @@ export default async function handler(req, res) {
 
     try {
         const response = await fetch(
-            'https://api.openai.com/v1/chat/completions',
+            'https://api.groq.com/openai/v1/chat/completions',
             {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+                    'Authorization': `Bearer ${process.env.GROQ_API_KEY}`
                 },
                 body: JSON.stringify({
-                    model: 'gpt-3.5-turbo',
+                    model: 'llama3-8b-8192',
                     messages: [
                         { role: 'system', content: systemPrompt },
                         ...messages.map(m => ({
@@ -47,15 +47,15 @@ export default async function handler(req, res) {
         const data = await response.json();
 
         if (!response.ok) {
-            console.error('OpenAI HTTP error:', response.status, JSON.stringify(data));
-            throw new Error(`OpenAI returned ${response.status}: ${data?.error?.message}`);
+            console.error('Groq HTTP error:', response.status, JSON.stringify(data));
+            throw new Error(`Groq returned ${response.status}: ${data?.error?.message}`);
         }
 
         const text = data.choices?.[0]?.message?.content;
 
         if (!text) {
-            console.error('No text in OpenAI response:', JSON.stringify(data));
-            throw new Error('No response from OpenAI');
+            console.error('No text in Groq response:', JSON.stringify(data));
+            throw new Error('No response from Groq');
         }
 
         const clean = text.replace(/```json|```/g, '').trim();
@@ -63,7 +63,7 @@ export default async function handler(req, res) {
 
         return res.status(200).json(parsed);
     } catch (err) {
-        console.error('OpenAI error:', err);
+        console.error('Groq error:', err);
         return res.status(200).json({
             message: "I'm here for you. Could you tell me a bit more about how you're feeling? 💙",
             quickReplies: ["I'm struggling", "I'm okay", "I need support"],
