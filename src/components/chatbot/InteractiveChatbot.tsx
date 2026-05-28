@@ -88,7 +88,7 @@ interface SmartResult {
 // Converts the in-memory message list to the format expected by fetch-openai.js
 // (which forwards to Gemini 1.5 Pro) and returns a parsed SmartResult.
 
-const NETLIFY_FN = "/.netlify/functions/fetch-openai";
+const NETLIFY_FN = "/api/chat";
 
 async function callGemini(
   userText: string,
