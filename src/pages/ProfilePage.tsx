@@ -19,10 +19,9 @@ import Toast, { ToastState, showToast } from '../components/Toast';
 import emailjs from '@emailjs/browser';
 
 // ─── EmailJS config — fill these in after setting up emailjs.com ──────────────
-VITE_EMAILJS_SERVICE_ID=service_kenhb9s
-VITE_EMAILJS_TEMPLATE_ID=rj5lq8o
-VITE_EMAILJS_PUBLIC_KEY=SZrPHR38h0jxewBcl
-
+const EMAILJS_SERVICE_ID  = import.meta.env.VITE_EMAILJS_SERVICE_ID;
+const EMAILJS_TEMPLATE_ID = import.meta.env.VITE_EMAILJS_TEMPLATE_ID;
+const EMAILJS_PUBLIC_KEY  = import.meta.env.VITE_EMAILJS_PUBLIC_KEY;
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface AssessmentRecord {
