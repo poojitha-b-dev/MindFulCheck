@@ -22,6 +22,11 @@ import emailjs from '@emailjs/browser';
 const EMAILJS_SERVICE_ID  = import.meta.env.VITE_EMAILJS_SERVICE_ID;
 const EMAILJS_TEMPLATE_ID = import.meta.env.VITE_EMAILJS_TEMPLATE_ID;
 const EMAILJS_PUBLIC_KEY  = import.meta.env.VITE_EMAILJS_PUBLIC_KEY;
+
+// Initialize EmailJS with public key
+if (EMAILJS_PUBLIC_KEY) {
+  emailjs.init(EMAILJS_PUBLIC_KEY);
+}
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface AssessmentRecord {
@@ -151,16 +156,19 @@ const ProfilePage: React.FC = () => {
     if (EMAILJS_SERVICE_ID === 'YOUR_SERVICE_ID') return; // not configured yet
 
     const checkAndSendReminders = async () => {
+      console.log('[MindfulCheck] Checking reminders...');
       const userRef = doc(db, 'users', currentUser.uid);
       const snap = await getDoc(userRef);
-      if (!snap.exists()) return;
+      if (!snap.exists()) { console.log('[MindfulCheck] No user doc found'); return; }
 
       const data = snap.data();
       const lastSent: string = data.lastReminderSent ?? '';
       const today = todayStr();
 
+      console.log('[MindfulCheck] lastSent:', lastSent, '| today:', today);
+
       // Already sent today — skip
-      if (lastSent === today) return;
+      if (lastSent === today) { console.log('[MindfulCheck] Already sent today, skipping'); return; }
 
       // Check if current time is at or past the chosen reminder time
       const [targetHour, targetMinute] = (notifPrefs.reminderTime ?? '09:00').split(':').map(Number);
@@ -168,7 +176,9 @@ const ProfilePage: React.FC = () => {
       const currentTotalMinutes = now.getHours() * 60 + now.getMinutes();
       const targetTotalMinutes  = targetHour * 60 + targetMinute;
 
-      if (currentTotalMinutes < targetTotalMinutes) return;
+      console.log('[MindfulCheck] Current time (mins):', currentTotalMinutes, '| Target (mins):', targetTotalMinutes);
+
+      if (currentTotalMinutes < targetTotalMinutes) { console.log('[MindfulCheck] Too early, skipping'); return; }
 
       // Build the messages to send
       const messages: { message: string }[] = [];
@@ -189,13 +199,14 @@ const ProfilePage: React.FC = () => {
         });
       }
 
-      if (messages.length === 0) return;
+      if (messages.length === 0) { console.log('[MindfulCheck] No toggles on, skipping'); return; }
 
       // Send one combined email
       const combinedMessage = messages.map((m, i) => `${i + 1}. ${m.message}`).join('\n\n');
 
+      console.log('[MindfulCheck] Sending reminder email to:', currentUser.email);
       try {
-        await emailjs.send(
+        const result = await emailjs.send(
           EMAILJS_SERVICE_ID,
           EMAILJS_TEMPLATE_ID,
           {
@@ -205,11 +216,11 @@ const ProfilePage: React.FC = () => {
           },
           EMAILJS_PUBLIC_KEY
         );
-
+        console.log('[MindfulCheck] Email sent! Status:', result.status, result.text);
         // Mark today as sent so it doesn't fire again
         await setDoc(userRef, { lastReminderSent: today }, { merge: true });
       } catch (err) {
-        console.error('EmailJS send failed:', err);
+        console.error('[MindfulCheck] EmailJS send FAILED:', err);
       }
     };
 
