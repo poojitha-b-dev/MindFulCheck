@@ -162,13 +162,13 @@ const ProfilePage: React.FC = () => {
       // Already sent today — skip
       if (lastSent === today) return;
 
-      // Check if current hour matches the chosen reminder time
+      // Check if current time is at or past the chosen reminder time
       const [targetHour, targetMinute] = (notifPrefs.reminderTime ?? '09:00').split(':').map(Number);
       const now = new Date();
-      const currentHour   = now.getHours();
-      const currentMinute = now.getMinutes();
+      const currentTotalMinutes = now.getHours() * 60 + now.getMinutes();
+      const targetTotalMinutes  = targetHour * 60 + targetMinute;
 
-
+      if (currentTotalMinutes < targetTotalMinutes) return;
 
       // Build the messages to send
       const messages: { message: string }[] = [];
@@ -290,7 +290,10 @@ const ProfilePage: React.FC = () => {
     if (!currentUser) return;
     try {
       setNotifSaving(true);
-      await setDoc(doc(db, 'users', currentUser.uid), { notificationPrefs: notifPrefs }, { merge: true });
+      await setDoc(doc(db, 'users', currentUser.uid), {
+        notificationPrefs: notifPrefs,
+        lastReminderSent: '', // reset so reminders re-check today after saving
+      }, { merge: true });
       showToast(setToast, 'success', 'Notification preferences saved.');
     } catch {
       showToast(setToast, 'error', 'Failed to save preferences. Please try again.');
